@@ -17,6 +17,17 @@ export CGO_CFLAGS="-O3 -mmacosx-version-min=14.0"
 export CGO_CXXFLAGS="-O3 -mmacosx-version-min=14.0"
 export CGO_LDFLAGS="-mmacosx-version-min=14.0"
 
+# Vulkan (via MoltenVK) for the AMD dGPU on Intel Macs -- Metal isn't built
+# for that slice (see docs/poc-macbook-vulkan.md). The golden image installs
+# LunarG's SDK to this path (docs/mac-ci-runner-setup.md); CI steps run
+# non-interactively and never source .zprofile, so default it here instead
+# of relying on the env var being set already.
+: "${VULKAN_SDK:=$HOME/VulkanSDK/current/macOS}"
+if [ -d "$VULKAN_SDK" ]; then
+    export VULKAN_SDK
+    export PATH="$VULKAN_SDK/bin:$PATH"
+fi
+
 set -e
 
 status() { echo >&2 ">>> $@"; }
@@ -56,18 +67,34 @@ _build_darwin() {
         INSTALL_PREFIX=dist/darwin-$ARCH/
         BUILD_DIR=build/darwin-$ARCH
 
+        # LLAMA_BACKENDS feeds -DOLLAMA_LLAMA_BACKENDS: cmake/local.cmake's own
+        # mechanism for building a GPU backend as a separate, dynamically-loaded
+        # runner (ollama_add_llama_server_build, RUNNER_DIR <name>) alongside the
+        # base CPU/RPC/BLAS build -- the same path cuda_v13/rocm_v7_1/etc use.
+        # A bare -DGGML_VULKAN=ON on the base build (tried first, see git history)
+        # compiles ggml-vulkan fine but the base build's install() rules only
+        # glob for CPU/rpc/blas payloads, so it never reaches dist/ -- it has to
+        # go through this runner mechanism to actually get packaged and to land
+        # in its own lib/ollama/vulkan/ directory alongside its dylib deps.
+        BUILD_TARGETS="ollama-local ollama-mlx-backends"
         if [ "$ARCH" = "amd64" ]; then
             CMAKE_ARCH=x86_64
             MLX_BACKENDS=metal_v3
             MLX_EXTRA_ARGS="-DMLX_ENABLE_X64_MAC=ON"
             MLX_CGO_CFLAGS="-O3 -mmacosx-version-min=14.0"
             MLX_CGO_LDFLAGS="-ldl -lc++ -framework Accelerate -mmacosx-version-min=14.0"
+            LLAMA_BACKENDS=
+            if [ -d "$VULKAN_SDK" ]; then
+                LLAMA_BACKENDS=vulkan
+                BUILD_TARGETS="$BUILD_TARGETS ollama-llama-server-backends"
+            fi
         else
             CMAKE_ARCH=arm64
             MLX_BACKENDS="metal_v3;metal_v4"
             MLX_EXTRA_ARGS=
             MLX_CGO_CFLAGS="-O3 -mmacosx-version-min=14.0"
             MLX_CGO_LDFLAGS="-lc++ -framework Metal -framework Foundation -framework Accelerate -mmacosx-version-min=14.0"
+            LLAMA_BACKENDS=
         fi
 
         cmake -S . -B "$BUILD_DIR" \
@@ -79,14 +106,37 @@ _build_darwin() {
             -DOLLAMA_GO_OUTPUT=$INSTALL_PREFIX/ollama \
             -DOLLAMA_VERSION="$VERSION" \
             -DOLLAMA_MLX_BACKENDS="$MLX_BACKENDS" \
-            -DOLLAMA_LLAMA_BACKENDS= \
+            -DOLLAMA_LLAMA_BACKENDS="$LLAMA_BACKENDS" \
             -DFETCHCONTENT_SOURCE_DIR_LLAMA_CPP=$LLAMA_CPP_SHARED_SRC \
             -DFETCHCONTENT_SOURCE_DIR_MLX=$MLX_SHARED_SRC \
             -DFETCHCONTENT_SOURCE_DIR_MLX-C=$MLX_C_SHARED_SRC \
             $MLX_EXTRA_ARGS
 
         GOOS=darwin GOARCH=$ARCH CGO_ENABLED=1 CGO_CFLAGS="$MLX_CGO_CFLAGS" CGO_LDFLAGS="$MLX_CGO_LDFLAGS" \
-            cmake --build "$BUILD_DIR" --target ollama-local --target ollama-mlx-backends --parallel "$BUILD_JOBS" -- -l "$BUILD_LOAD"
+            cmake --build "$BUILD_DIR" $(printf -- '--target %s ' $BUILD_TARGETS) --parallel "$BUILD_JOBS" -- -l "$BUILD_LOAD"
+
+        if [ "$ARCH" = "amd64" ] && [ "$LLAMA_BACKENDS" = "vulkan" ]; then
+            status "Bundling MoltenVK runtime for the Vulkan backend"
+            VULKAN_RUNNER_DIR="$INSTALL_PREFIX/lib/ollama/vulkan"
+            cp -p "$VULKAN_SDK/lib/libvulkan.1.dylib" "$VULKAN_SDK/lib/libMoltenVK.dylib" "$VULKAN_RUNNER_DIR/"
+            # The SDK's own manifest points at MoltenVK via a path relative to
+            # its *own* share/vulkan/icd.d/ layout ("../../../lib/..."), which
+            # doesn't resolve once the dylib is sitting next to it in our own
+            # runner dir instead -- write one that does. discover/runner.go's
+            # withVulkanICD() points VK_ICD_FILENAMES at this file at runtime;
+            # without it the Vulkan loader has no driver to route calls to and
+            # silently finds zero devices (see docs/poc-macbook-vulkan.md).
+            cat > "$VULKAN_RUNNER_DIR/MoltenVK_icd.json" <<-EOF
+			{
+			    "file_format_version": "1.0.0",
+			    "ICD": {
+			        "library_path": "./libMoltenVK.dylib",
+			        "api_version": "1.4.0",
+			        "is_portability_driver": true
+			    }
+			}
+			EOF
+        fi
     done
 }
 
