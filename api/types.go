@@ -911,8 +911,12 @@ type ClusterConfigRequest struct {
 // [Client.ClusterList]. See cluster.Peer for the field semantics this
 // mirrors.
 type ClusterPeer struct {
-	ID        string          `json:"id"`
-	Addr      string          `json:"addr"`
+	ID   string `json:"id"`
+	Addr string `json:"addr"`
+	// Addrs is every address this peer is reachable at (Addr is whichever
+	// of these probed fastest) -- useful to see when a multi-homed peer's
+	// interfaces differ a lot in latency.
+	Addrs     []string        `json:"addrs,omitempty"`
 	Sharing   bool            `json:"sharing"`
 	Devices   []ClusterDevice `json:"devices"`
 	Load      float64         `json:"load"`

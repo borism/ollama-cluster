@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"slices"
 	"testing"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 func TestAnnouncementJSONRoundTrip(t *testing.T) {
 	want := announcement{
 		ID:      "peer-1",
+		Addrs:   []string{"192.168.1.10", "192.168.2.10"},
 		RPCPort: 50052,
 		Devices: []ml.DeviceInfo{
 			{DeviceID: ml.DeviceID{ID: "0", Library: "CUDA"}, Name: "A4500", TotalMemory: 20 << 30, FreeMemory: 12 << 30},
@@ -49,6 +51,9 @@ func TestAnnouncementJSONRoundTrip(t *testing.T) {
 	}
 	if len(got.Devices) != 1 || got.Devices[0].Name != "A4500" || got.Devices[0].FreeMemory != 12<<30 {
 		t.Fatalf("Devices: got %+v", got.Devices)
+	}
+	if !slices.Equal(got.Addrs, want.Addrs) {
+		t.Fatalf("Addrs: got %v want %v", got.Addrs, want.Addrs)
 	}
 }
 
@@ -144,6 +149,194 @@ func TestListenLoopReceivesAnnouncement(t *testing.T) {
 			t.Fatal("context timed out waiting for peer-2")
 		case <-time.After(100 * time.Millisecond):
 		}
+	}
+}
+
+// TestObservePreservesProbedAddr guards the fix for a multi-homed peer
+// getting pinned to whichever interface's beacon last happened to arrive:
+// once probeLoop has picked a best address via setBest, a routine new
+// beacon (observe) must not clobber it back to the beacon's own source IP.
+func TestObservePreservesProbedAddr(t *testing.T) {
+	tbl := &Table{peers: make(map[string]Peer)}
+	tbl.observe(Peer{ID: "p1", Addr: "10.0.0.1", Addrs: []string{"10.0.0.1", "10.0.0.2"}, LastSeen: time.Now()})
+	tbl.setBest("p1", "10.0.0.2", 2*time.Millisecond)
+
+	// A fresh beacon arrives from the slower address again.
+	tbl.observe(Peer{ID: "p1", Addr: "10.0.0.1", Addrs: []string{"10.0.0.1", "10.0.0.2"}, LastSeen: time.Now()})
+
+	got := tbl.peers["p1"]
+	if got.Addr != "10.0.0.2" {
+		t.Fatalf("Addr = %q, want probeLoop's pick 10.0.0.2 to survive the new beacon", got.Addr)
+	}
+	if got.Latency != 2*time.Millisecond {
+		t.Fatalf("Latency = %v, want the probed value to survive the new beacon", got.Latency)
+	}
+}
+
+// TestProbeOncePicksReachableCandidate is the one real-networking test for
+// multi-address selection: a peer with two candidate addresses, one with
+// nothing listening, must end up pinned to the one that actually answers.
+func TestProbeOncePicksReachableCandidate(t *testing.T) {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("no loopback TCP available in this sandbox: %v", err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	// TEST-NET-1 (RFC 5737, 192.0.2.0/24): guaranteed non-routable, so this
+	// dial fails fast (or times out) rather than actually connecting.
+	tbl := &Table{peers: map[string]Peer{
+		"p1": {
+			ID:       "p1",
+			Addr:     "192.0.2.1", // wrong pick, as if the last beacon came in on the dead interface
+			Addrs:    []string{"192.0.2.1", "127.0.0.1"},
+			RPCPort:  port,
+			LastSeen: time.Now(),
+		},
+	}, ttl: time.Minute}
+
+	probeOnce(tbl)
+
+	got := tbl.peers["p1"]
+	if got.Addr != "127.0.0.1" {
+		t.Fatalf("Addr = %q, want probeOnce to have corrected it to the reachable candidate 127.0.0.1", got.Addr)
+	}
+	if got.Latency <= 0 {
+		t.Fatalf("Latency = %v, want a positive measured value", got.Latency)
+	}
+}
+
+// TestProbePeerDialsCandidatesConcurrently guards against the obvious way
+// to re-break this: two unreachable candidates plus one reachable one.
+// Dialed one-by-one this would take at least 2*probeTimeout; dialed
+// concurrently, about one probeTimeout regardless of candidate count.
+func TestProbePeerDialsCandidatesConcurrently(t *testing.T) {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("no loopback TCP available in this sandbox: %v", err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	p := Peer{
+		ID:       "p1",
+		Addrs:    []string{"192.0.2.1", "192.0.2.2", "127.0.0.1"}, // 192.0.2.0/24 (RFC 5737) is non-routable
+		RPCPort:  port,
+		LastSeen: time.Now(),
+	}
+	tbl := &Table{peers: map[string]Peer{"p1": p}}
+
+	start := time.Now()
+	probePeer(tbl, p)
+	elapsed := time.Since(start)
+
+	if elapsed > probeTimeout+250*time.Millisecond {
+		t.Fatalf("probePeer took %v, want close to one probeTimeout (%v) -- candidates aren't being dialed concurrently", elapsed, probeTimeout)
+	}
+	if got := tbl.peers["p1"].Addr; got != "127.0.0.1" {
+		t.Fatalf("Addr = %q, want the reachable candidate", got)
+	}
+}
+
+// TestBackoffDelayIncreasesThenCaps checks the doubling schedule and cap
+// directly, without waiting real time out.
+func TestBackoffDelayIncreasesThenCaps(t *testing.T) {
+	cases := []struct {
+		failures int
+		want     time.Duration
+	}{
+		{1, probeInterval},
+		{2, 2 * probeInterval},
+		{3, 4 * probeInterval},
+	}
+	for _, c := range cases {
+		if got := backoffDelay(c.failures); got != c.want {
+			t.Errorf("backoffDelay(%d) = %v, want %v", c.failures, got, c.want)
+		}
+	}
+	if got := backoffDelay(20); got != probeBackoffMax {
+		t.Errorf("backoffDelay(20) = %v, want cap %v", got, probeBackoffMax)
+	}
+}
+
+// TestShouldProbeBacksOffThenRecovers checks the Table bookkeeping
+// backoffDelay feeds: a failure makes the candidate not due, a success
+// clears that immediately.
+func TestShouldProbeBacksOffThenRecovers(t *testing.T) {
+	tbl := &Table{peers: make(map[string]Peer)}
+	key := "p1|10.0.0.9"
+
+	if !tbl.shouldProbe(key) {
+		t.Fatal("a never-probed candidate should be due")
+	}
+	tbl.recordProbeFailure(key)
+	if tbl.shouldProbe(key) {
+		t.Fatal("immediately after a failure, the candidate should be backed off")
+	}
+	tbl.recordProbeSuccess(key)
+	if !tbl.shouldProbe(key) {
+		t.Fatal("a success should clear backoff immediately")
+	}
+}
+
+// TestProbePeerSkipsBackedOffCandidate is the end-to-end version: a
+// candidate with an established failure streak must not be redialed at
+// all (not just deprioritized), even though it's still listed in Addrs.
+func TestProbePeerSkipsBackedOffCandidate(t *testing.T) {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("no loopback TCP available in this sandbox: %v", err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	p := Peer{ID: "p1", Addrs: []string{"192.0.2.1", "127.0.0.1"}, RPCPort: port, LastSeen: time.Now()}
+	tbl := &Table{peers: map[string]Peer{"p1": p}}
+
+	// Give the unreachable candidate an established failure streak so
+	// it's now well into its backoff window.
+	tbl.recordProbeFailure("p1|192.0.2.1")
+	tbl.recordProbeFailure("p1|192.0.2.1")
+
+	start := time.Now()
+	probePeer(tbl, p)
+	elapsed := time.Since(start)
+
+	// If the backed-off candidate were dialed anyway, this would take
+	// close to probeTimeout; skipping it should be near-instant.
+	if elapsed > 250*time.Millisecond {
+		t.Fatalf("probePeer took %v, want near-instant with the unreachable candidate backed off", elapsed)
+	}
+	if got := tbl.peers["p1"].Addr; got != "127.0.0.1" {
+		t.Fatalf("Addr = %q, want the reachable candidate", got)
 	}
 }
 

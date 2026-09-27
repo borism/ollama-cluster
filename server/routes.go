@@ -2416,6 +2416,7 @@ func clusterPeerToAPI(p cluster.Peer) api.ClusterPeer {
 	return api.ClusterPeer{
 		ID:        p.ID,
 		Addr:      p.Addr,
+		Addrs:     p.Addrs,
 		Sharing:   p.RPCPort != 0,
 		Devices:   devices,
 		Load:      p.Load,

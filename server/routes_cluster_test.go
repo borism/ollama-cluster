@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"slices"
 	"testing"
 	"time"
 
@@ -16,6 +17,7 @@ func TestClusterPeerToAPI(t *testing.T) {
 	got := clusterPeerToAPI(cluster.Peer{
 		ID:      "abc123",
 		Addr:    "192.0.2.1",
+		Addrs:   []string{"192.0.2.1", "192.0.2.2"},
 		RPCPort: 50052,
 		Devices: []ml.DeviceInfo{
 			{Name: "CUDA0", TotalMemory: 20 << 30, FreeMemory: 10 << 30},
@@ -27,6 +29,9 @@ func TestClusterPeerToAPI(t *testing.T) {
 
 	if got.ID != "abc123" || got.Addr != "192.0.2.1" {
 		t.Errorf("id/addr not carried through: %+v", got)
+	}
+	if !slices.Equal(got.Addrs, []string{"192.0.2.1", "192.0.2.2"}) {
+		t.Errorf("addrs not carried through: %+v", got.Addrs)
 	}
 	if !got.Sharing {
 		t.Error("expected Sharing true when RPCPort is nonzero")

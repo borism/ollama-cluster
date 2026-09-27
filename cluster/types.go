@@ -20,8 +20,18 @@ type Peer struct {
 	// broadcasts (it will see them via the same UDP broadcast it sent).
 	ID string
 
-	// Addr is the source IP the beacon was seen from.
+	// Addr is our current best address for this peer: of Addrs, the one
+	// probeLoop last measured the lowest RPC-port latency over. Until the
+	// first probe completes it's provisionally the source IP the beacon
+	// was seen from.
 	Addr string
+
+	// Addrs is every address this peer self-reported owning (one per
+	// non-loopback interface), plus the beacon's own source IP. A
+	// multi-homed peer (e.g. a laptop with both Ethernet and Wi-Fi up)
+	// lists more than one; probeLoop dials each and Addr tracks whichever
+	// is fastest, rather than whichever happened to carry a given beacon.
+	Addrs []string
 
 	// RPCPort is the ggml-rpc-server port on Addr, or 0 if this peer is
 	// not currently willing to share (OLLAMA_CLUSTER_SHARE=0).
