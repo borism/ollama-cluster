@@ -70,9 +70,10 @@ curl -fsSL https://raw.githubusercontent.com/borism/ollama-cluster/main/scripts/
 
 Linux gets the same GPU backends as stock Ollama (NVIDIA CUDA 12/13,
 Vulkan, AMD ROCm, NVIDIA JetPack), with the installer fetching the
-ROCm/JetPack extras when it detects that hardware; macOS gets Metal, as
-an unsigned command-line install (no menu-bar app). No Linux MLX engine
-yet -- see `docs/releasing.md`.
+ROCm/JetPack extras when it detects that hardware; macOS gets Metal on
+Apple Silicon, Vulkan (via MoltenVK) on Intel Macs with an AMD discrete
+GPU, as an unsigned command-line install (no menu-bar app). No Linux
+MLX engine yet -- see `docs/releasing.md`.
 
 ### Windows
 
