@@ -911,13 +911,25 @@ type ClusterConfigRequest struct {
 // [Client.ClusterList]. See cluster.Peer for the field semantics this
 // mirrors.
 type ClusterPeer struct {
-	ID        string          `json:"id"`
-	Addr      string          `json:"addr"`
-	Sharing   bool            `json:"sharing"`
-	Devices   []ClusterDevice `json:"devices"`
-	Load      float64         `json:"load"`
-	LatencyMs int64           `json:"latency_ms,omitempty"`
-	LastSeen  time.Time       `json:"last_seen"`
+	ID   string `json:"id"`
+	Addr string `json:"addr"`
+	// Addrs is every address this peer is reachable at (Addr is whichever
+	// of these probed fastest) -- useful to see when a multi-homed peer's
+	// interfaces differ a lot in latency.
+	Addrs   []string        `json:"addrs,omitempty"`
+	Sharing bool            `json:"sharing"`
+	Devices []ClusterDevice `json:"devices"`
+	Load    float64         `json:"load"`
+	// LatencyMs is a float, not int64: on a fast LAN, round-trip is
+	// routinely sub-millisecond, and Duration.Milliseconds() truncating
+	// that to 0 -- which omitempty then drops from the response -- made
+	// same-subnet peers look unprobed forever.
+	LatencyMs float64 `json:"latency_ms,omitempty"`
+	// BandwidthMbps is our own last-measured one-way throughput to this
+	// peer, in megabits/sec -- a timed payload push, not a spec-sheet
+	// number (see cluster.Peer.BandwidthMbps). Zero until first measured.
+	BandwidthMbps float64   `json:"bandwidth_mbps,omitempty"`
+	LastSeen      time.Time `json:"last_seen"`
 }
 
 // ClusterDevice is one GPU (or CPU) a [ClusterPeer] reports as available.

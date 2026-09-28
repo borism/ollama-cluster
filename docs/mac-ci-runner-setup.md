@@ -250,7 +250,9 @@ tart exec ollama-cluster-darwin-golden bash -lc '
 ```
 
 The Vulkan SDK is for building `llama-server` with `GGML_VULKAN=ON` for
-Intel Macs (the TODO "Vulkan on Intel Macs"). LunarG's SDK bundles
+Intel Macs with an AMD dGPU (`build_darwin.sh`'s `OLLAMA_LLAMA_BACKENDS=vulkan`
+step, amd64 only, when the SDK is present -- verified end to end on real
+mbp-i9-class hardware). LunarG's SDK bundles
 MoltenVK, the Vulkan loader, `glslc` and the SPIR-V tools as **universal**
 (x86_64 + arm64) binaries, so the arm64 VM can cross-build x86_64 against
 it. It installs into the user's home directory, no `sudo`. Check the

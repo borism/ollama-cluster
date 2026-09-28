@@ -20,8 +20,18 @@ type Peer struct {
 	// broadcasts (it will see them via the same UDP broadcast it sent).
 	ID string
 
-	// Addr is the source IP the beacon was seen from.
+	// Addr is our current best address for this peer: of Addrs, the one
+	// probeLoop last measured the lowest RPC-port latency over. Until the
+	// first probe completes it's provisionally the source IP the beacon
+	// was seen from.
 	Addr string
+
+	// Addrs is every address this peer self-reported owning (one per
+	// non-loopback interface), plus the beacon's own source IP. A
+	// multi-homed peer (e.g. a laptop with both Ethernet and Wi-Fi up)
+	// lists more than one; probeLoop dials each and Addr tracks whichever
+	// is fastest, rather than whichever happened to carry a given beacon.
+	Addrs []string
 
 	// RPCPort is the ggml-rpc-server port on Addr, or 0 if this peer is
 	// not currently willing to share (OLLAMA_CLUSTER_SHARE=0).
@@ -49,6 +59,13 @@ type Peer struct {
 	// self-reported: it depends on the path from *this* node, which the
 	// peer can't know.
 	Latency time.Duration
+
+	// BandwidthMbps is our own last-measured one-way throughput to this
+	// peer's Addr, in megabits/sec (a timed payload push, see
+	// bandwidth.go's bandwidthLoop) -- zero until the first successful
+	// measurement. Like Latency, this is not self-reported: it's specific
+	// to the path from *this* node.
+	BandwidthMbps float64
 
 	// LastSeen is when we last heard this peer's beacon.
 	LastSeen time.Time

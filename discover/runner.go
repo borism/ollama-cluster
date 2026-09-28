@@ -5,6 +5,7 @@ package discover
 import (
 	"context"
 	"log/slog"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -528,6 +529,12 @@ func normalizeDiscoveryEnv(ollamaLibDirs []string, extraEnvs map[string]string) 
 }
 
 func normalizeDiscoveryEnvForGOOS(goos string, ollamaLibDirs []string, extraEnvs map[string]string) map[string]string {
+	if goos == "darwin" {
+		if env := withVulkanICD(ollamaLibDirs, extraEnvs); env != nil {
+			extraEnvs = env
+		}
+	}
+
 	if goos != "linux" || len(ollamaLibDirs) == 0 || !isROCmLibraryDir(filepath.Base(ollamaLibDirs[len(ollamaLibDirs)-1])) {
 		return extraEnvs
 	}
@@ -553,6 +560,35 @@ func normalizeDiscoveryEnvForGOOS(goos string, ollamaLibDirs []string, extraEnvs
 
 func isROCmLibraryDir(name string) bool {
 	return strings.HasPrefix(name, "rocm")
+}
+
+// withVulkanICD points a bundled MoltenVK build at its own ICD manifest
+// (scripts/build_darwin.sh writes MoltenVK_icd.json next to
+// libggml-vulkan.so and libMoltenVK.dylib in the vulkan runner directory).
+// Without VK_ICD_FILENAMES the Vulkan loader has no registered driver to
+// route calls to and silently enumerates zero devices -- macOS has no
+// system-wide Vulkan ICD registry the way Linux has /usr/share/vulkan/icd.d,
+// so this can't be discovered any other way. Returns nil (no change) when
+// the caller already set VK_ICD_FILENAMES, the vulkan runner isn't the one
+// being probed, or its manifest isn't actually present.
+func withVulkanICD(ollamaLibDirs []string, extraEnvs map[string]string) map[string]string {
+	if len(ollamaLibDirs) == 0 || extraEnvs["VK_ICD_FILENAMES"] != "" {
+		return nil
+	}
+	dir := ollamaLibDirs[len(ollamaLibDirs)-1]
+	if filepath.Base(dir) != "vulkan" {
+		return nil
+	}
+	icd := filepath.Join(dir, "MoltenVK_icd.json")
+	if _, err := os.Stat(icd); err != nil {
+		return nil
+	}
+	env := make(map[string]string, len(extraEnvs)+1)
+	for k, v := range extraEnvs {
+		env[k] = v
+	}
+	env["VK_ICD_FILENAMES"] = icd
+	return env
 }
 
 type bootstrapDevicesResult struct {

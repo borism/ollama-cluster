@@ -43,10 +43,10 @@ their own `ollama serve` was built with, so a cluster can mix CUDA, Vulkan
 and Metal machines freely (RPC only moves tensors, not driver-specific code):
 
 ```
-ID                ADDRESS        SHARING    DEVICES                    LOAD    LATENCY    LAST SEEN
-9f3a1c7e2b804d61  192.0.2.11     yes        CUDA0 (14.2 GiB free)      12%     4ms        3 seconds ago
-0c88e4a1f5d23b90  192.0.2.12     yes        Vulkan0 (11.8 GiB free)    0%      9ms        8 seconds ago
-5e21bb4f0a9c7712  192.0.2.13     no         Metal0 (9.0 GiB free)      45%     -          a minute ago
+ID                ADDRESS        SHARING    DEVICES                    LOAD    LATENCY    BANDWIDTH    LAST SEEN
+9f3a1c7e2b804d61  192.0.2.11     yes        CUDA0 (14.2 GiB free)      12%     4ms        890 Mbps     3 seconds ago
+0c88e4a1f5d23b90  192.0.2.12     yes        Vulkan0 (11.8 GiB free)    0%      0.71ms     -            8 seconds ago
+5e21bb4f0a9c7712  192.0.2.13     no         Metal0 (9.0 GiB free)      45%     -          -            a minute ago
 ```
 
 (addresses above are placeholders, not real hosts.)
@@ -70,9 +70,10 @@ curl -fsSL https://raw.githubusercontent.com/borism/ollama-cluster/main/scripts/
 
 Linux gets the same GPU backends as stock Ollama (NVIDIA CUDA 12/13,
 Vulkan, AMD ROCm, NVIDIA JetPack), with the installer fetching the
-ROCm/JetPack extras when it detects that hardware; macOS gets Metal, as
-an unsigned command-line install (no menu-bar app). No Linux MLX engine
-yet -- see `docs/releasing.md`.
+ROCm/JetPack extras when it detects that hardware; macOS gets Metal on
+Apple Silicon, Vulkan (via MoltenVK) on Intel Macs with an AMD discrete
+GPU, as an unsigned command-line install (no menu-bar app). No Linux
+MLX engine yet -- see `docs/releasing.md`.
 
 ### Windows
 

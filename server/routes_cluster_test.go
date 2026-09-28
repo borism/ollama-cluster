@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"slices"
 	"testing"
 	"time"
 
@@ -16,6 +17,7 @@ func TestClusterPeerToAPI(t *testing.T) {
 	got := clusterPeerToAPI(cluster.Peer{
 		ID:      "abc123",
 		Addr:    "192.0.2.1",
+		Addrs:   []string{"192.0.2.1", "192.0.2.2"},
 		RPCPort: 50052,
 		Devices: []ml.DeviceInfo{
 			{Name: "CUDA0", TotalMemory: 20 << 30, FreeMemory: 10 << 30},
@@ -28,11 +30,14 @@ func TestClusterPeerToAPI(t *testing.T) {
 	if got.ID != "abc123" || got.Addr != "192.0.2.1" {
 		t.Errorf("id/addr not carried through: %+v", got)
 	}
+	if !slices.Equal(got.Addrs, []string{"192.0.2.1", "192.0.2.2"}) {
+		t.Errorf("addrs not carried through: %+v", got.Addrs)
+	}
 	if !got.Sharing {
 		t.Error("expected Sharing true when RPCPort is nonzero")
 	}
 	if got.LatencyMs != 25 {
-		t.Errorf("expected LatencyMs 25, got %d", got.LatencyMs)
+		t.Errorf("expected LatencyMs 25, got %v", got.LatencyMs)
 	}
 	if !got.LastSeen.Equal(now) {
 		t.Errorf("expected LastSeen %v, got %v", now, got.LastSeen)
@@ -43,6 +48,14 @@ func TestClusterPeerToAPI(t *testing.T) {
 
 	if notSharing := clusterPeerToAPI(cluster.Peer{RPCPort: 0}); notSharing.Sharing {
 		t.Error("expected Sharing false when RPCPort is zero")
+	}
+
+	// A same-subnet peer's round trip is routinely sub-millisecond; that
+	// must not truncate to the zero value omitempty then drops (see
+	// api.ClusterPeer.LatencyMs).
+	fast := clusterPeerToAPI(cluster.Peer{Latency: 600 * time.Microsecond})
+	if fast.LatencyMs != 0.6 {
+		t.Errorf("expected sub-ms LatencyMs 0.6, got %v", fast.LatencyMs)
 	}
 }
 
