@@ -1,6 +1,8 @@
 package llm
 
 import (
+	"bytes"
+	"log/slog"
 	"net"
 	"os"
 	"strconv"
@@ -57,6 +59,41 @@ func TestRPCWorkerStartStop(t *testing.T) {
 	entries, err := os.ReadDir(cacheDir)
 	if err != nil || len(entries) == 0 {
 		t.Logf("cache dir %s has no entries after a connection with no RPC traffic (expected -- cache only fills on actual tensor transfer)", cacheDir)
+	}
+}
+
+// TestRPCWorkerLogsUnexpectedExit covers the gap two real fleet crashes hit:
+// the worker's own process dying leaves Port() correctly reporting 0 (so
+// peers stop being told this instance shares), but until now nothing said
+// *why* -- cmd.Wait() was checked only to close a channel. A killed-out-from-
+// under-it worker should at least leave a log line behind.
+func TestRPCWorkerLogsUnexpectedExit(t *testing.T) {
+	if _, err := FindRPCWorker(); err != nil {
+		t.Skipf("ggml-rpc-server not found, skipping: %v", err)
+	}
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(prev)
+
+	w, err := StartRPCWorker(0, "")
+	if err != nil {
+		t.Fatalf("StartRPCWorker: %v", err)
+	}
+	defer w.Stop()
+
+	if err := w.cmd.Process.Kill(); err != nil {
+		t.Fatalf("kill worker process: %v", err)
+	}
+	select {
+	case <-w.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker did not report exit after being killed")
+	}
+
+	if got := buf.String(); !strings.Contains(got, "rpc worker exited") {
+		t.Fatalf("log output = %q, want a line about the worker exiting", got)
 	}
 }
 

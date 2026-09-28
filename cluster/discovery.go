@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -32,6 +33,7 @@ const (
 // receiver, not the sender.
 type announcement struct {
 	ID         string          `json:"id"`
+	Addrs      []string        `json:"addrs,omitempty"`
 	RPCPort    int             `json:"rpc_port"`
 	Devices    []ml.DeviceInfo `json:"devices"`
 	ProtoMajor int             `json:"proto_major"`
@@ -46,6 +48,13 @@ type Table struct {
 	peers   map[string]Peer
 	ttl     time.Duration
 	stopped chan struct{}
+
+	// backoff tracks consecutive probe failures per "peerID|addr"
+	// candidate (see shouldProbe/recordProbeFailure), so a candidate
+	// that's never reachable from here -- e.g. a peer's Thunderbolt
+	// bridge address, which only the *other* end of that cable can ever
+	// dial -- stops being redialed every probeInterval forever.
+	backoff map[string]probeBackoff
 }
 
 // Stopped is closed once discovery has shut down after its context was
@@ -85,16 +94,89 @@ func (t *Table) updateSelf(p Peer) {
 func (t *Table) observe(p Peer) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	// A fresh beacon only refreshes identity/capacity fields. Which of
+	// Addrs is actually fastest is probeLoop's job, on its own slower
+	// cadence -- don't let every 5s beacon stomp the address it already
+	// worked out, back to a merely-provisional one. BandwidthMbps is the
+	// same story one level further out (bandwidthLoop's 5-minute cadence):
+	// an announcement never carries it at all, so without this a beacon
+	// arriving even a second after a real measurement wiped it straight
+	// back to zero -- the bug that made bandwidth look permanently
+	// unmeasured despite bandwidthPeer succeeding.
+	if existing, ok := t.peers[p.ID]; ok && existing.Addr != "" {
+		p.Addr = existing.Addr
+		p.Latency = existing.Latency
+		p.BandwidthMbps = existing.BandwidthMbps
+	}
 	t.peers[p.ID] = p
 }
 
-// setLatency records a freshly-probed round trip for an already-known
-// peer (see probeLoop). A no-op if the peer expired between listing and
-// probing -- nothing to update.
-func (t *Table) setLatency(id string, d time.Duration) {
+// probeBackoff is one candidate address's consecutive-failure streak (see
+// Table.backoff).
+type probeBackoff struct {
+	failures int
+	nextTry  time.Time
+}
+
+// probeBackoffMax caps how long a failing candidate is skipped before
+// being retried, so a genuinely-recovered link (cable replugged, firewall
+// reopened) doesn't stay out of rotation forever.
+const probeBackoffMax = 5 * time.Minute
+
+// backoffDelay is how long to wait before redialing a candidate that has
+// now failed `failures` times in a row: one failure gets no extra delay
+// (transient blips are common and cheap to just retry next cycle), each
+// further consecutive failure doubles the wait, up to probeBackoffMax.
+func backoffDelay(failures int) time.Duration {
+	d := probeInterval
+	for i := 1; i < failures && d < probeBackoffMax; i++ {
+		d *= 2
+	}
+	if d > probeBackoffMax {
+		d = probeBackoffMax
+	}
+	return d
+}
+
+// shouldProbe reports whether a "peerID|addr" candidate is due for a
+// fresh dial, or still serving out backoff from previous failures.
+func (t *Table) shouldProbe(key string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	bo, ok := t.backoff[key]
+	return !ok || !time.Now().Before(bo.nextTry)
+}
+
+// recordProbeSuccess clears any backoff for key: a candidate that just
+// answered is trusted again immediately, not eased back in gradually.
+func (t *Table) recordProbeSuccess(key string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(t.backoff, key)
+}
+
+// recordProbeFailure bumps key's failure streak and schedules its next
+// retry per backoffDelay.
+func (t *Table) recordProbeFailure(key string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.backoff == nil {
+		t.backoff = make(map[string]probeBackoff)
+	}
+	bo := t.backoff[key]
+	bo.failures++
+	bo.nextTry = time.Now().Add(backoffDelay(bo.failures))
+	t.backoff[key] = bo
+}
+
+// setBest records the fastest of a peer's candidate addresses (see
+// probeLoop). A no-op if the peer expired between listing and probing --
+// nothing to update.
+func (t *Table) setBest(id, addr string, d time.Duration) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if p, ok := t.peers[id]; ok {
+		p.Addr = addr
 		p.Latency = d
 		t.peers[id] = p
 	}
@@ -124,6 +206,11 @@ func Start(ctx context.Context, cfg Config) (*Table, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cluster: listen udp :%d: %w", cfg.Port, err)
 	}
+	bwLn, err := bandwidthListen(cfg.Port)
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
 
 	t := &Table{
 		peers:   make(map[string]Peer),
@@ -134,10 +221,13 @@ func Start(ctx context.Context, cfg Config) (*Table, error) {
 	go broadcastLoop(ctx, conn, cfg, t)
 	go listenLoop(ctx, conn, cfg, t)
 	go probeLoop(ctx, t)
+	go bandwidthLoop(ctx, t, cfg.Port)
+	go acceptBandwidthConns(ctx, bwLn)
 
 	go func() {
 		<-ctx.Done()
 		conn.Close()
+		bwLn.Close()
 		close(t.stopped)
 	}()
 
@@ -147,12 +237,46 @@ func Start(ctx context.Context, cfg Config) (*Table, error) {
 func selfAnnouncement(cfg Config) announcement {
 	return announcement{
 		ID:         cfg.SelfID,
+		Addrs:      selfAddrs(),
 		RPCPort:    cfg.SelfRPCPort(),
 		Devices:    cfg.SelfDevices(),
 		ProtoMajor: RPCProtoMajor,
 		ProtoMinor: RPCProtoMinor,
 		Load:       cfg.SelfLoad(),
 	}
+}
+
+// selfAddrs returns this host's own IPv4 addresses across every up,
+// non-loopback interface, self-reported in the announcement as Peer.Addrs.
+// A multi-homed host (e.g. a laptop with both Ethernet and Wi-Fi up) lists
+// more than one; the receiver's probeLoop measures each and keeps the
+// fastest, rather than whichever address happened to carry a given beacon
+// (see Peer.Addr).
+func selfAddrs() []string {
+	var out []string
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return out
+	}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			ipnet, ok := a.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			if ip4 := ipnet.IP.To4(); ip4 != nil {
+				out = append(out, ip4.String())
+			}
+		}
+	}
+	return out
 }
 
 // broadcastAddrs returns the subnet-directed broadcast address (e.g.
@@ -215,12 +339,16 @@ func resolveSeeds(seeds []string) []*net.UDPAddr {
 
 // broadcastLoop periodically encodes and sends our own announcement.
 func broadcastLoop(ctx context.Context, conn *net.UDPConn, cfg Config, t *Table) {
-	dsts := append(broadcastAddrs(cfg.Port), resolveSeeds(cfg.Seeds)...)
-
 	ticker := time.NewTicker(cfg.Interval)
 	defer ticker.Stop()
 
 	send := func() {
+		// Recomputed on every tick, not cached: a laptop that switches
+		// interfaces (Ethernet -> Wi-Fi, or gets a new address on wake)
+		// needs its next beacon to go out the current interface list, not
+		// whatever was up when the loop started.
+		dsts := append(broadcastAddrs(cfg.Port), resolveSeeds(cfg.Seeds)...)
+
 		a := selfAnnouncement(cfg)
 		t.updateSelf(Peer{
 			ID:         a.ID,
@@ -261,12 +389,17 @@ const (
 	probeTimeout  = 500 * time.Millisecond
 )
 
-// probeLoop periodically times a TCP dial to each live peer's RPC port and
-// records it as that peer's Latency. This is a real measurement, not a
-// placeholder: the dial's handshake is one round trip over the same link
-// the RPC traffic itself would use. A peer that fails to answer just keeps
-// its last-known latency (or zero, if never probed) -- water-fill treats
-// that as "no measured cost yet" rather than excluding the peer.
+// probeLoop periodically times a TCP dial to each of a live peer's
+// candidate RPC addresses (Peer.Addrs) and keeps the fastest as Peer.Addr.
+// This is a real measurement, not a placeholder: the dial's handshake is
+// one round trip over the same link the RPC traffic itself would use. A
+// multi-homed peer (e.g. a laptop with both Ethernet and Wi-Fi up) can
+// otherwise end up pinned to whichever interface happened to carry its
+// most recent discovery beacon -- an accident of routing, not a measured
+// choice, and one link can be several times slower than the other. A peer
+// with none of its candidates reachable this round just keeps its
+// last-known address/latency (or zero, if never probed) -- water-fill
+// treats that as "no measured cost yet" rather than excluding the peer.
 func probeLoop(ctx context.Context, t *Table) {
 	ticker := time.NewTicker(probeInterval)
 	defer ticker.Stop()
@@ -275,24 +408,92 @@ func probeLoop(ctx context.Context, t *Table) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			for _, p := range t.Peers() {
-				if p.RPCPort == 0 {
-					continue
-				}
-				addr := net.JoinHostPort(p.Addr, strconv.Itoa(p.RPCPort))
-				start := time.Now()
-				conn, err := net.DialTimeout("tcp", addr, probeTimeout)
-				if err != nil {
-					slog.Debug("cluster: latency probe failed, keeping last-known value", "id", p.ID, "addr", addr, "error", err)
-					continue
-				}
-				conn.Close()
-				latency := time.Since(start)
-				slog.Debug("cluster: probed peer latency", "id", p.ID, "addr", addr, "latency", latency)
-				t.setLatency(p.ID, latency)
-			}
+			probeOnce(t)
 		}
 	}
+}
+
+// probeOnce is one probeLoop pass, pulled out so tests can trigger it
+// directly instead of waiting on probeInterval's real-time ticker. Peers,
+// and each peer's own candidates, are all dialed concurrently -- an
+// unreachable candidate costs at most probeTimeout, never probeTimeout
+// times the number of peers times the number of candidates, however many
+// interfaces the fleet grows to report.
+func probeOnce(t *Table) {
+	var wg sync.WaitGroup
+	for _, p := range t.Peers() {
+		if p.RPCPort == 0 {
+			continue
+		}
+		wg.Add(1)
+		go func(p Peer) {
+			defer wg.Done()
+			probePeer(t, p)
+		}(p)
+	}
+	wg.Wait()
+}
+
+// probePeer dials every one of p's candidate addresses concurrently,
+// skipping any still backed off (see Table.shouldProbe), and records the
+// fastest that answers as the peer's new best address. A candidate that's
+// never reachable from here -- a peer's Thunderbolt-bridge link-local
+// address, say, which only the other end of that cable can dial -- stops
+// being retried every cycle once it's built up a failure streak.
+func probePeer(t *Table, p Peer) {
+	candidates := p.Addrs
+	if len(candidates) == 0 {
+		candidates = []string{p.Addr}
+	}
+
+	type probed struct {
+		addr    string
+		latency time.Duration
+	}
+	results := make(chan probed, len(candidates))
+
+	var wg sync.WaitGroup
+	due := 0
+	for _, ip := range candidates {
+		key := p.ID + "|" + ip
+		if !t.shouldProbe(key) {
+			continue
+		}
+		due++
+		wg.Add(1)
+		go func(ip, key string) {
+			defer wg.Done()
+			addr := net.JoinHostPort(ip, strconv.Itoa(p.RPCPort))
+			start := time.Now()
+			conn, err := net.DialTimeout("tcp", addr, probeTimeout)
+			if err != nil {
+				slog.Debug("cluster: latency probe failed, backing off", "id", p.ID, "addr", addr, "error", err)
+				t.recordProbeFailure(key)
+				return
+			}
+			conn.Close()
+			t.recordProbeSuccess(key)
+			results <- probed{ip, time.Since(start)}
+		}(ip, key)
+	}
+	if due == 0 {
+		return // every candidate is still serving out backoff
+	}
+	wg.Wait()
+	close(results)
+
+	var bestAddr string
+	var bestLatency time.Duration
+	for r := range results {
+		if bestAddr == "" || r.latency < bestLatency {
+			bestAddr, bestLatency = r.addr, r.latency
+		}
+	}
+	if bestAddr == "" {
+		return // every due candidate failed, keep the last-known address
+	}
+	slog.Debug("cluster: probed peer latency", "id", p.ID, "addr", bestAddr, "latency", bestLatency)
+	t.setBest(p.ID, bestAddr, bestLatency)
 }
 
 // listenLoop reads incoming beacons and updates the table, ignoring our own.
@@ -318,9 +519,18 @@ func listenLoop(ctx context.Context, conn *net.UDPConn, cfg Config, t *Table) {
 		if a.ID == "" || a.ID == cfg.SelfID {
 			continue
 		}
+		srcAddr := src.IP.String()
+		addrs := a.Addrs
+		if !slices.Contains(addrs, srcAddr) {
+			// Always include the address the beacon actually arrived from,
+			// even if it's missing or stale in the peer's self-report --
+			// it's proof that address works.
+			addrs = append(addrs, srcAddr)
+		}
 		t.observe(Peer{
 			ID:         a.ID,
-			Addr:       src.IP.String(),
+			Addr:       srcAddr, // provisional; probeLoop picks the fastest of Addrs
+			Addrs:      addrs,
 			RPCPort:    a.RPCPort,
 			Devices:    a.Devices,
 			ProtoMajor: a.ProtoMajor,

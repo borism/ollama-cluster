@@ -112,10 +112,32 @@ func StartRPCWorker(port int, cacheDir string) (*RPCWorker, error) {
 		status: status,
 	}
 
-	go func(cmd *exec.Cmd, done chan struct{}) {
-		cmd.Wait()
+	go func(cmd *exec.Cmd, done chan struct{}, status *StatusWriter) {
+		err := cmd.Wait()
 		close(done)
-	}(cmd, w.done)
+		// Port() (and so the beacon's Sharing flag) already reflects this
+		// via w.running() -- but that's silent about *why* the worker went
+		// away, which left two real crashes this fleet hit with zero trace
+		// (see llm/rpc_worker_test.go). Stop() also lands here (it kills
+		// the process, then waits on the same done channel this Wait()
+		// closes), so a deliberate stop logs too -- an "exit status 1" from
+		// a normal kill isn't worth telling apart from a real crash, at
+		// slog.Info it's noise either way, not an alarm.
+		//
+		// TODO(upstream llama.cpp): both crashes this caught turned out to
+		// be a clean exit (err == nil, no captured stderr) -- traced to
+		// ggml_backend_rpc_start_server's serve loop
+		// (ggml/src/ggml-rpc/ggml-rpc.cpp): a single failed accept() on the
+		// listening socket logs "Failed to accept client connection" and
+		// returns, ending the whole process, no retry. This logging call
+		// only makes that visible; it doesn't make the worker resilient to
+		// it. Two fixes, not mutually exclusive:
+		// (a) loop past a transient accept() failure instead of returning,
+		// or (b) have this Go side treat an unexpected (non-Stop) exit as
+		// a signal to restart the worker rather than leave it down until
+		// the next manual restart.
+		slog.Info("cluster: rpc worker exited", "error", err, "last_output", status.LastError())
+	}(cmd, w.done, status)
 
 	// Generous on purpose: on Apple Silicon the first start after install
 	// compiles the Metal kernel libraries before listening (~22s on an M2

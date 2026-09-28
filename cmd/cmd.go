@@ -1309,7 +1309,16 @@ func ClusterListHandler(cmd *cobra.Command, args []string) error {
 
 		latency := "-"
 		if p.LatencyMs > 0 {
-			latency = fmt.Sprintf("%dms", p.LatencyMs)
+			if p.LatencyMs < 1 {
+				latency = fmt.Sprintf("%.2fms", p.LatencyMs)
+			} else {
+				latency = fmt.Sprintf("%.0fms", p.LatencyMs)
+			}
+		}
+
+		bandwidth := "-"
+		if p.BandwidthMbps > 0 {
+			bandwidth = fmt.Sprintf("%.0f Mbps", p.BandwidthMbps)
 		}
 
 		data = append(data, []string{
@@ -1319,12 +1328,13 @@ func ClusterListHandler(cmd *cobra.Command, args []string) error {
 			strings.Join(devices, ", "),
 			fmt.Sprintf("%.0f%%", p.Load*100),
 			latency,
+			bandwidth,
 			format.HumanTime(p.LastSeen, "-"),
 		})
 	}
 
 	table := tablewriter.NewWriter(os.Stdout)
-	table.SetHeader([]string{"ID", "ADDRESS", "SHARING", "DEVICES", "LOAD", "LATENCY", "LAST SEEN"})
+	table.SetHeader([]string{"ID", "ADDRESS", "SHARING", "DEVICES", "LOAD", "LATENCY", "BANDWIDTH", "LAST SEEN"})
 	table.SetHeaderAlignment(tablewriter.ALIGN_LEFT)
 	table.SetAlignment(tablewriter.ALIGN_LEFT)
 	table.SetHeaderLine(false)
