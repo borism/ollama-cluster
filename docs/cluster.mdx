@@ -125,16 +125,22 @@ a cluster can mix CUDA, Vulkan and Metal machines freely, since RPC only
 moves tensors, not driver-specific code:
 
 ```
-ID                ADDRESS        SHARING    DEVICES                    LOAD    LATENCY    LAST SEEN
-9f3a1c7e2b804d61  192.0.2.11     yes        CUDA0 (14.2 GiB free)      12%     4ms        3 seconds ago
-0c88e4a1f5d23b90  192.0.2.12     yes        Vulkan0 (11.8 GiB free)    0%      9ms        8 seconds ago
-5e21bb4f0a9c7712  192.0.2.13     no         Metal0 (9.0 GiB free)      45%     -          a minute ago
+ID                ADDRESS        SHARING    DEVICES                    LOAD    LATENCY    BANDWIDTH    LAST SEEN
+9f3a1c7e2b804d61  192.0.2.11     yes        CUDA0 (14.2 GiB free)      12%     4ms        890 Mbps     3 seconds ago
+0c88e4a1f5d23b90  192.0.2.12     yes        Vulkan0 (11.8 GiB free)    0%      0.71ms     -            8 seconds ago
+5e21bb4f0a9c7712  192.0.2.13     no         Metal0 (9.0 GiB free)      45%     -          -            a minute ago
 ```
 
 (addresses above are placeholders, not real hosts.) A peer that isn't
 sharing (`SHARING no`) still shows up with its devices — useful for
 seeing what's on the LAN even before it opts in — but placement will
-never pick it.
+never pick it. LATENCY is a round-trip TCP dial, measured every 10
+seconds, and shows extra decimal precision below 1ms rather than
+rounding a same-subnet peer's sub-millisecond link down to nothing.
+BANDWIDTH is a one-way throughput measurement (a timed payload push, not
+a spec-sheet number) that runs far less often — every 5 minutes per
+peer — so it reads `-` until the first measurement lands, same as a
+peer that was only just discovered.
 
 ## Checking a running model's spillover
 
