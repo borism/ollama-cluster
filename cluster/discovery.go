@@ -97,10 +97,16 @@ func (t *Table) observe(p Peer) {
 	// A fresh beacon only refreshes identity/capacity fields. Which of
 	// Addrs is actually fastest is probeLoop's job, on its own slower
 	// cadence -- don't let every 5s beacon stomp the address it already
-	// worked out, back to a merely-provisional one.
+	// worked out, back to a merely-provisional one. BandwidthMbps is the
+	// same story one level further out (bandwidthLoop's 5-minute cadence):
+	// an announcement never carries it at all, so without this a beacon
+	// arriving even a second after a real measurement wiped it straight
+	// back to zero -- the bug that made bandwidth look permanently
+	// unmeasured despite bandwidthPeer succeeding.
 	if existing, ok := t.peers[p.ID]; ok && existing.Addr != "" {
 		p.Addr = existing.Addr
 		p.Latency = existing.Latency
+		p.BandwidthMbps = existing.BandwidthMbps
 	}
 	t.peers[p.ID] = p
 }

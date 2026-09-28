@@ -160,6 +160,7 @@ func TestObservePreservesProbedAddr(t *testing.T) {
 	tbl := &Table{peers: make(map[string]Peer)}
 	tbl.observe(Peer{ID: "p1", Addr: "10.0.0.1", Addrs: []string{"10.0.0.1", "10.0.0.2"}, LastSeen: time.Now()})
 	tbl.setBest("p1", "10.0.0.2", 2*time.Millisecond)
+	tbl.setBandwidth("p1", 471.0)
 
 	// A fresh beacon arrives from the slower address again.
 	tbl.observe(Peer{ID: "p1", Addr: "10.0.0.1", Addrs: []string{"10.0.0.1", "10.0.0.2"}, LastSeen: time.Now()})
@@ -170,6 +171,9 @@ func TestObservePreservesProbedAddr(t *testing.T) {
 	}
 	if got.Latency != 2*time.Millisecond {
 		t.Fatalf("Latency = %v, want the probed value to survive the new beacon", got.Latency)
+	}
+	if got.BandwidthMbps != 471.0 {
+		t.Fatalf("BandwidthMbps = %v, want bandwidthLoop's measurement to survive the new beacon (same bug class as Addr/Latency, just a slower cadence)", got.BandwidthMbps)
 	}
 }
 
