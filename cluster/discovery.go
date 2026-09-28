@@ -200,6 +200,11 @@ func Start(ctx context.Context, cfg Config) (*Table, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cluster: listen udp :%d: %w", cfg.Port, err)
 	}
+	bwLn, err := bandwidthListen(cfg.Port)
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
 
 	t := &Table{
 		peers:   make(map[string]Peer),
@@ -210,10 +215,13 @@ func Start(ctx context.Context, cfg Config) (*Table, error) {
 	go broadcastLoop(ctx, conn, cfg, t)
 	go listenLoop(ctx, conn, cfg, t)
 	go probeLoop(ctx, t)
+	go bandwidthLoop(ctx, t, cfg.Port)
+	go acceptBandwidthConns(ctx, bwLn)
 
 	go func() {
 		<-ctx.Done()
 		conn.Close()
+		bwLn.Close()
 		close(t.stopped)
 	}()
 

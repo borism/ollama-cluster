@@ -2414,14 +2414,15 @@ func clusterPeerToAPI(p cluster.Peer) api.ClusterPeer {
 		})
 	}
 	return api.ClusterPeer{
-		ID:        p.ID,
-		Addr:      p.Addr,
-		Addrs:     p.Addrs,
-		Sharing:   p.RPCPort != 0,
-		Devices:   devices,
-		Load:      p.Load,
-		LatencyMs: p.Latency.Milliseconds(),
-		LastSeen:  p.LastSeen,
+		ID:            p.ID,
+		Addr:          p.Addr,
+		Addrs:         p.Addrs,
+		Sharing:       p.RPCPort != 0,
+		Devices:       devices,
+		Load:          p.Load,
+		LatencyMs:     float64(p.Latency.Microseconds()) / 1000,
+		BandwidthMbps: p.BandwidthMbps,
+		LastSeen:      p.LastSeen,
 	}
 }
 

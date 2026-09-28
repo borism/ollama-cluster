@@ -60,6 +60,13 @@ type Peer struct {
 	// peer can't know.
 	Latency time.Duration
 
+	// BandwidthMbps is our own last-measured one-way throughput to this
+	// peer's Addr, in megabits/sec (a timed payload push, see
+	// bandwidth.go's bandwidthLoop) -- zero until the first successful
+	// measurement. Like Latency, this is not self-reported: it's specific
+	// to the path from *this* node.
+	BandwidthMbps float64
+
 	// LastSeen is when we last heard this peer's beacon.
 	LastSeen time.Time
 }

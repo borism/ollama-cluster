@@ -37,7 +37,7 @@ func TestClusterPeerToAPI(t *testing.T) {
 		t.Error("expected Sharing true when RPCPort is nonzero")
 	}
 	if got.LatencyMs != 25 {
-		t.Errorf("expected LatencyMs 25, got %d", got.LatencyMs)
+		t.Errorf("expected LatencyMs 25, got %v", got.LatencyMs)
 	}
 	if !got.LastSeen.Equal(now) {
 		t.Errorf("expected LastSeen %v, got %v", now, got.LastSeen)
@@ -48,6 +48,14 @@ func TestClusterPeerToAPI(t *testing.T) {
 
 	if notSharing := clusterPeerToAPI(cluster.Peer{RPCPort: 0}); notSharing.Sharing {
 		t.Error("expected Sharing false when RPCPort is zero")
+	}
+
+	// A same-subnet peer's round trip is routinely sub-millisecond; that
+	// must not truncate to the zero value omitempty then drops (see
+	// api.ClusterPeer.LatencyMs).
+	fast := clusterPeerToAPI(cluster.Peer{Latency: 600 * time.Microsecond})
+	if fast.LatencyMs != 0.6 {
+		t.Errorf("expected sub-ms LatencyMs 0.6, got %v", fast.LatencyMs)
 	}
 }
 
