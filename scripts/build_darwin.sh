@@ -153,7 +153,7 @@ _merge_darwin_payload() {
             case "$BASE" in
                 llama-server|llama-quantize|ggml-rpc-server|mlx_*) continue ;;
             esac
-            [ -e "dist/darwin/lib/ollama/$BASE" ] || cp -P "$F" dist/darwin/lib/ollama/
+            [ -e "dist/darwin/lib/ollama/$BASE" ] || cp -RP "$F" dist/darwin/lib/ollama/
         done
     done
 
