@@ -148,6 +148,7 @@
               "/faq",
               "/gpu",
               "/cluster",
+              "/cluster-benchmarks",
               "/troubleshooting"
             ]
           }

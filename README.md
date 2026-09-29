@@ -51,8 +51,45 @@ ID                ADDRESS        SHARING    DEVICES                    LOAD    L
 
 (addresses above are placeholders, not real hosts.)
 
+**It works, and it's fast(er):** on a real LAN fleet, models too big for the
+head's own GPU go from 2–4 tok/s CPU-only to 15–75 tok/s with cluster
+offload — up to 8.6× — across 8 models and context sizes from 4K to 128K.
+For a 70B model (`deepseek-r1:70b`), cluster mode isn't just faster, it's
+the only way it runs at all — CPU-only fails outright with an out-of-memory
+error on a single machine. Two caveats: **greedy wins more often than
+waterfill, but not always** — which of the two placement strategies is
+faster depends on the model and context size, so neither is a safe default
+(see below); and **`qwen3.8:27b` doesn't benefit from cluster mode at all**
+— it's a hybrid Mamba/SSM architecture that llama.cpp's CUDA/RPC backends
+don't offload yet, so it silently runs full-CPU regardless of placement.
+See [`docs/cluster-benchmarks.mdx`](docs/cluster-benchmarks.mdx) for the
+full numbers.
+
 See [`docs/cluster.mdx`](docs/cluster.mdx) for environment variables,
 per-request overrides, and current limitations.
+
+### Open questions from the benchmarks
+
+The numbers above raise two things we don't yet have a root cause for:
+
+- **Why greedy usually beats waterfill.** Greedy wins 18 of 24 measured
+  rows, generally by using fewer RPC peers and saving the extra network hop
+  per token — but waterfill wins when spreading layers across peers adds
+  more raw compute than the hop costs, and one model (`granite4.2:30b`) hits
+  a KV-cache-driven cliff under greedy specifically at long context. Our
+  working theory is that greedy's placement heuristic doesn't account for
+  per-request KV cache growth, but we haven't instrumented the placement
+  code to confirm it.
+- **Why `qwen3.8:27b` never offloads.** We've confirmed the symptom (`load_tensors`
+  logs 0/66 layers offloaded on every run, cluster or not) and a plausible
+  cause (missing CUDA/RPC op support for this architecture's recurrent-state
+  ops), but haven't traced it to a specific missing op in `ggml-rpc.cpp` or
+  filed it upstream.
+
+Both are noted as open in [`docs/cluster-benchmarks.mdx`](docs/cluster-benchmarks.mdx);
+further testing (varying KV cache size independently of context, and
+bisecting `qwen3.8`'s op graph) is needed before either can be called
+understood rather than just observed.
 
 ## Download
 

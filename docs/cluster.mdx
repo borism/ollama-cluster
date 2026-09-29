@@ -221,7 +221,23 @@ wins over the saved value; `ollama cluster status` shows which one applies.
 ## Per-request overrides
 
 These are also settable per API request or Modelfile `PARAMETER`, taking
-priority over the server's environment-variable policy for that one request:
+priority over the server's environment-variable policy for that one request.
+
+**They belong inside `options`, not at the top level of the request body** —
+they're fields of `api.Runner` (`api/types.go`), which is what `options`
+deserializes into. A field in the wrong place is silently dropped (Go's JSON
+decoder ignores keys a struct doesn't have, no error, no warning), so a
+misplaced override doesn't fail loudly — it just quietly falls back to the
+server's default policy, which looks like it worked until you check what
+peers actually got used:
+
+```json
+// wrong — rpc_placement is ignored, no error, server uses its default policy
+{ "model": "...", "prompt": "...", "rpc_placement": "greedy" }
+
+// right
+{ "model": "...", "prompt": "...", "options": { "rpc_placement": "greedy" } }
+```
 
 - `rpc_servers` — a literal `"host:port,host:port"` list, bypassing
   discovery/placement entirely and passed straight to llama-server's `--rpc`.
@@ -246,6 +262,17 @@ never on an open network. For the same reason, the server only accepts
 machine, judged by the connection's address, not by any forwarding header;
 a reverse proxy on the same machine would count as local.
 
+## Benchmarks
+
+Real end-to-end runs on a live LAN fleet, 7 models × 3 context sizes:
+2–4 tok/s CPU-only vs 15–75 tok/s with cluster offload on models too big
+for the head's own GPU — up to 8.8× faster, no simulation involved. At 70B
+(`deepseek-r1:70b`), cluster mode stops being a speedup and becomes a
+requirement: the CPU-only baseline fails outright with an out-of-memory
+error on a single machine, so this is the only way that model runs on this
+fleet at all. See [Cluster benchmarks](/cluster-benchmarks) for the full
+per-model breakdown and caveats.
+
 ## Current limitations
 
 - Hub-and-spoke only (see above) — no multi-hop mesh across peers.
@@ -255,3 +282,7 @@ a reverse proxy on the same machine would count as local.
 - Cross-subnet discovery via `OLLAMA_CLUSTER_SEEDS` is implemented and
   unit-tested but has limited real-world mileage so far — same-subnet
   broadcast discovery is the well-exercised path.
+- Hybrid Mamba/SSM + attention models (GGUF metadata reports `*.ssm.*`
+  fields) don't offload to GPU or RPC peers at all in this build — an
+  upstream llama.cpp op-support gap, not a placement bug. See [Cluster
+  benchmarks](/cluster-benchmarks) for a measured example.
