@@ -58,6 +58,14 @@ jobs:
       CGO_CFLAGS: '-mmacosx-version-min=14.0 -O3'
       CGO_CXXFLAGS: '-mmacosx-version-min=14.0 -O3'
       CGO_LDFLAGS: '-mmacosx-version-min=14.0 -O3'
+      # scripts/build_darwin.sh (upstream's own script) signs+notarizes when
+      # APPLE_IDENTITY is set and falls back to ad-hoc signing when it's
+      # empty -- so this is a no-op fork until the "release" environment's
+      # secrets (docs/releasing.md) are actually populated.
+      APPLE_IDENTITY: ${{ secrets.APPLE_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
     steps:
       - uses: actions/checkout@v4
       - name: Verify build toolchain
@@ -73,6 +81,28 @@ jobs:
           xcodebuild -version
           xcrun --sdk macosx --show-sdk-version
           xcrun --find metal
+      - name: Import Developer ID certificate
+        # The VM this runs in is a fresh clone destroyed right after this job
+        # (docs/mac-ci-runner-setup.md) -- no temporary keychain lifecycle to
+        # manage, the whole login keychain goes away with it. Skipped
+        # entirely when the "release" environment has no signing secrets
+        # (a workflow_dispatch test run on a branch, or before they're set up).
+        if: ${{ env.APPLE_IDENTITY != '' }}
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          MAC_LOGIN_KEYCHAIN_PASSWORD: ${{ secrets.MAC_LOGIN_KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          echo "$APPLE_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k login.keychain-db \
+              -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          # Lets codesign use the imported key without an interactive
+          # keychain-access prompt, which would hang a headless run.
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+              -s -k "$MAC_LOGIN_KEYCHAIN_PASSWORD" login.keychain-db
+          rm -f "$RUNNER_TEMP/cert.p12"
+          security find-identity -v -p codesigning
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -84,10 +114,11 @@ jobs:
       - run: |
           cmake -S . -B build/go-license -DOLLAMA_LLAMA_BACKENDS= -DOLLAMA_MLX_BACKENDS= -DOLLAMA_PAYLOAD_INSTALL_PREFIX=dist/darwin-arm64 "-DOLLAMA_GO_LICENSE_TARGETS=darwin/amd64;darwin/arm64"
           cmake --build build/go-license --target ollama-go-license
-          # build+package only -- no `sign` (needs Apple Developer ID/notarization
-          # secrets this fork doesn't have); the app is built in its own step.
+          # build+package only -- no `sign` (that only covers the CLI
+          # tarball; the app step below signs+notarizes Ollama.app, which
+          # embeds the same binaries, so signing here would be redundant).
           ./scripts/build_darwin.sh build package
-      - name: Build Ollama.app (ad-hoc signed, not notarized)
+      - name: Build Ollama.app (signed + notarized when APPLE_IDENTITY is set, ad-hoc otherwise)
         # Needs node@20 and typescript, which the golden image has
         # (docs/mac-ci-runner-setup.md). `app` also rewrites
         # dist/ollama-darwin.tgz in its flat layout, which the repackage
@@ -97,6 +128,10 @@ jobs:
           test -d dist/Ollama.app
           codesign --verify --deep dist/Ollama.app
           test -f dist/Ollama-darwin.zip
+          if [ -n "$APPLE_IDENTITY" ]; then
+              spctl --assess --type execute -vvv dist/Ollama.app
+              test -f dist/Ollama.dmg
+          fi
       - name: Repackage as bin/+lib/ollama (matches the Linux tarball shape)
         # build_darwin.sh's own ollama-darwin.tgz is a flat layout (kept for
         # other internal tooling, see .github/scripts/prepare_mlx_darwin.sh)
@@ -121,9 +156,13 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: bundles-darwin
+          # Ollama.dmg only exists when APPLE_IDENTITY is set (build_darwin.sh
+          # only notarizes+staples a dmg when it can sign it); upload-artifact
+          # warns rather than fails when a path matches nothing.
           path: |
             dist/ollama-darwin.tgz
             dist/Ollama-darwin.zip
+            dist/Ollama.dmg
 
   # Linux: the same Dockerfile stages stock Ollama's release builds
   # (upstream release.yaml's linux-depends matrix, scripts/build_linux.sh's
@@ -347,7 +386,7 @@ jobs:
 
           shopt -s nullglob
           pids=()
-          for payload in dist/*.txt dist/*.tgz dist/*.tar.zst dist/*.sh dist/*.zip ; do
+          for payload in dist/*.txt dist/*.tgz dist/*.tar.zst dist/*.sh dist/*.zip dist/*.dmg ; do
             # Publish the checksum manifest only after every payload has succeeded.
             [ "$payload" = dist/sha256sum.txt ] && continue
             echo "Uploading $payload"
