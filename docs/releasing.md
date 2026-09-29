@@ -33,27 +33,34 @@ How `.github/workflows/release.yaml` and `scripts/install.sh` work for
   **Signing/notarization secrets** (all in the `release` GitHub
   Environment, `repo Settings -> Environments -> release -> Secrets`;
   `darwin-build`'s Import step is skipped entirely when they're unset,
-  same ad-hoc fallback as before):
-  - `APPLE_CERTIFICATE_P12` -- a Developer ID Application certificate,
-    exported from Keychain Access as a `.p12` and base64'd
+  same ad-hoc fallback as before). Notarization uses an App Store
+  Connect API key, not an Apple ID + app-specific password -- nothing to
+  rotate, no 2FA prompt risk:
+  - `APPLE_CERTIFICATE_P12` -- a Developer ID Application certificate.
+    Easiest source: Xcode -> Settings -> Accounts -> your Apple ID ->
+    Manage Certificates -> **+** -> "Developer ID Application"; then
+    export it from Keychain Access as a `.p12` and base64 it
     (`base64 -i cert.p12 | pbcopy`).
   - `APPLE_CERTIFICATE_PASSWORD` -- the password set when exporting that `.p12`.
   - `APPLE_IDENTITY` -- the exact signing identity string, e.g.
     `Developer ID Application: Your Name (TEAMID)` -- get it after
     importing with `security find-identity -v -p codesigning`.
-  - `APPLE_ID` / `APPLE_PASSWORD` -- your Apple ID email and an
-    **app-specific password** for it (appleid.apple.com -> Sign-In and
-    Security -> App-Specific Passwords), not your account password.
-  - `APPLE_TEAM_ID` -- the 10-character Team ID from
-    developer.apple.com/account -> Membership.
+  - `APPLE_API_KEY_P8` -- an App Store Connect API key, base64'd
+    (`base64 -i AuthKey_XXXXXXXXXX.p8 | pbcopy`). Generate one at
+    appstoreconnect.apple.com -> Users and Access -> Integrations ->
+    Keys -> Generate API Key, role "Developer". The `.p8` only downloads
+    once -- if it's lost, revoke and generate a new key.
+  - `APPLE_API_KEY_ID` / `APPLE_API_ISSUER_ID` -- shown alongside that
+    key when you generate it (Issuer ID is the same for every key on the
+    account).
   - `MAC_LOGIN_KEYCHAIN_PASSWORD` -- the ephemeral VM guest account's
     login password (docs/mac-ci-runner-setup.md step 3); needed so
     `security set-key-partition-list` can grant codesign access to the
     imported key without an interactive prompt, which would hang a
     headless run.
   The VM this all runs in is a fresh clone destroyed right after the job
-  (docs/mac-ci-runner-setup.md), so there's no keychain cleanup step --
-  the whole login keychain goes away with it.
+  (docs/mac-ci-runner-setup.md), so there's no keychain or key-file
+  cleanup step -- both go away with the VM.
 - **The desktop app updates from this repo's releases, not ollama.com.**
   Upstream's `app/updater` checks `ollama.com/api/update`, which would
   replace this fork's app with stock Ollama, so `UpdateCheckURLBase` is
