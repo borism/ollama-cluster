@@ -339,7 +339,13 @@ _build_macapp() {
 
         rm -f dist/Ollama.dmg
 
+        # --skip-jenkins: our self-hosted runner boots the VM headless (no
+        # GUI login session), so create-dmg's Finder-prettifying AppleScript
+        # times out waiting for AppleEvents ("Finder got an error: AppleEvent
+        # timed out"). Skipping it means the .dmg lacks the nice icon
+        # layout/background but still installs fine.
         (cd dist && ../scripts/create-dmg.sh \
+            --skip-jenkins \
             --volname "${VOL_NAME}" \
             --volicon ../app/darwin/Ollama.app/Contents/Resources/icon.icns \
             --background ../app/assets/background.png \
