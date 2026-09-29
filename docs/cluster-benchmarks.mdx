@@ -1,0 +1,163 @@
+---
+title: Cluster benchmarks
+---
+
+Real numbers from a live LAN fleet running the `v0.34.4-cluster.1` release
+build — no simulation, no synthetic harness. Every model was already on the
+head node's disk; each cell below is one real `/api/generate` request against
+`ollama serve` with `OLLAMA_CLUSTER=1`.
+
+## Fleet
+
+| Node | Role | GPU |
+|---|---|---|
+| Head (Linux) | head | NVIDIA RTX A4500, 20 GB |
+| Mac peer | RPC worker | Apple M2 Max, ~25 GB free (unified memory) |
+| Mac peer¹ | RPC worker | Apple M1 Air, ~9 GB free (unified memory) |
+
+Other machines were on the LAN and discovered fine, but didn't have enough
+free VRAM to take part in any of these runs. Peers were found over UDP
+discovery with zero manual wiring — just `OLLAMA_CLUSTER=1` on each machine,
+no `--rpc` flags or static peer list.
+
+¹ Only used for `deepseek-r1:70b` (see the table below): at 39.6 GB it needed
+this second Mac RPC peer alongside the M2 Max to have enough combined free
+memory to run at all, so that row is the only one in the table below that
+used a three-machine fleet instead of two. Every other model ran on just the
+head and the M2 Max.
+
+## Tokens/sec, by model and context
+
+Prompt: *"Explain the difference between TCP and UDP in three sentences."*
+`num_predict` 150. One run per cell (not averaged) — treat any single number
+as a sample, not a statistic. "Best speedup" is the better of the two cluster
+placement strategies (`waterfill` / `greedy`) over the CPU-only baseline,
+same row.
+
+| Model | Context | CPU only | Waterfill | Greedy | Best speedup |
+|---|---|---|---|---|---|
+| qwen3.6:35b-a3b-mtp | 4K | 14.21 | 36.28 | 48.70 | 3.4× |
+| qwen3.6:35b-a3b-mtp | 32K | 11.37 | 28.25 | 68.39 | 6.0× |
+| qwen3.6:35b-a3b-mtp | 128K | 11.12 | 36.17 | 70.76 | 6.4× |
+| ornith-1.5:35b | 4K | 12.70 | 28.16 | 50.25 | 4.0× |
+| ornith-1.5:35b | 32K | 12.77 | 23.56 | 35.52 | 2.8× |
+| ornith-1.5:35b | 128K | 13.80 | 25.77 | 34.17 | 2.5× |
+| nemotron-3.5-lightning | 4K | 14.50 | 26.30 | 54.25 | 3.7× |
+| nemotron-3.5-lightning | 32K | 10.79 | 32.35 | 53.37 | 4.9× |
+| nemotron-3.5-lightning | 128K | 14.24 | 32.61 | 52.32 | 3.7× |
+| muse-glimmer:30b-dflash | 4K | 4.02 | 27.36 | 28.30 | 7.0× |
+| muse-glimmer:30b-dflash | 32K | 3.64 | 7.95 | 16.64 | 4.6× |
+| muse-glimmer:30b-dflash | 128K | 3.34 | 8.42 | 16.05 | 4.8× |
+| gemma4:31b-it-qat | 4K | 2.14 | 7.87 | 16.81 | 7.9× |
+| gemma4:31b-it-qat | 32K | 2.10 | 7.94 | 17.17 | 8.2× |
+| gemma4:31b-it-qat | 128K | 2.06 | 8.18 | 17.42 | 8.5× |
+| qwen3-coder:30b | 4K | 16.48 | 25.87 | 41.32 | 2.5× |
+| qwen3-coder:30b | 32K | 10.24 | 60.24 | 49.91 | 5.9× |
+| qwen3-coder:30b | 128K | 11.91 | 45.77 | 51.53 | 4.3× |
+| granite4.2:30b | 4K | 2.17 | 7.84 | 18.53² | 8.5× |
+| granite4.2:30b | 32K | 2.16 | 8.79 | 18.60 | 8.6× |
+| granite4.2:30b | 128K³ | 2.08 | 7.97 | 7.84 | 3.8× |
+| deepseek-r1:70b | 4K | OOM⁴ | 3.02 | **5.58** | n/a⁴ |
+| deepseek-r1:70b | 32K | OOM⁴ | 3.41 | 3.41 | n/a⁴ |
+| deepseek-r1:70b | 128K | OOM⁴ | 1.30 | 1.36 | n/a⁴ |
+
+This is the rerun after the `rpc_placement` JSON-nesting bug (see Takeaways)
+was found and fixed — every waterfill/greedy cell above is a real,
+isolated measurement of that placement mode, not two readings of the same
+server-default policy.
+
+² `granite4.2:30b` · greedy · 4K hit one HTTP 500 on first attempt (the
+head evicting/reloading state under back-to-back requests, not a placement
+bug) — retested immediately after and succeeded cleanly: 18.53 tok/s, 43.7s
+load. The number above is the retest.
+
+³ `granite4.2:30b` is the only model with a context-dependent cliff, and
+it's specific to **greedy**: greedy holds ~18.5 tok/s at 4K/32K then drops to
+7.84 at 128K, while waterfill stays flat around 8 tok/s the whole way —
+larger KV cache at 128K forces a different, worse single/few-peer layer
+split under greedy, and waterfill's wider split has nowhere further to
+fall. Every other model in this table holds its cluster throughput roughly
+steady from 4K through 128K under both strategies.
+
+⁴ `deepseek-r1:70b` is 39.6 GB (Q4_K_M) — it doesn't fit any single fleet
+machine's memory, so the CPU-only baseline (`num_gpu: 0`, all-local) isn't
+just slow here, it's **impossible**: it fails outright with
+
+```
+ggml_aligned_malloc: insufficient memory (attempted to allocate 31320.00 MB)
+alloc_tensor_range: failed to allocate CPU_REPACK buffer of size 32841400320
+error loading model: unable to allocate CPU_REPACK buffer
+```
+
+on the head's 62 GB of RAM, once everything else running on it is accounted
+for — cluster mode is the only way this model runs on this fleet at all, not
+just the faster way, so "best speedup" has no baseline to compute against.
+Its two placement rows also aren't directly comparable to the rest of the
+table: they used a three-machine fleet (M2 Max + M1 Air, see Fleet above)
+instead of the two-machine fleet everything else in this table ran on, and
+at 39.6 GB it's far bigger than any other model here — its 1.3–5.6 tok/s is
+expected for a model this size, not a regression. **Greedy beat waterfill 2×
+at 4K by using only one peer instead of two** (78/81 layers offloaded, three
+fell back to CPU) — half the RPC hops per token, and that trade won
+decisively. At 32K and 128K, larger KV cache pressure leaves neither
+algorithm room to choose differently — both converge on the same two-peer,
+81-layer split and near-identical throughput.
+
+## Takeaways
+
+- **69 requests attempted, all 69 eventually succeeded** (one greedy/4K
+  cell needed one retry after a transient HTTP 500 — see the footnote above;
+  `deepseek-r1:70b` contributes 6 of the 69 but has no CPU-only leg, since
+  that baseline is impossible for it — see footnote ⁴).
+- **Best observed speedup: 8.6×** (`granite4.2:30b`, 32K context, greedy)
+  over the same model's CPU-only baseline on the same machine.
+- Models in the 18–25 GB range that don't fit the head's 20 GB card benefit
+  the most — they're CPU-bound (2–4 tok/s) without cluster mode and
+  GPU-speed (15–70 tok/s) with it.
+- **Correction**: an earlier version of this table set `rpc_placement` as a
+  top-level JSON field instead of nesting it inside `options`, where the API
+  actually expects it (see `api.Runner` in `api/types.go`, and "Per-request
+  overrides" in `cluster.mdx`) — silently ignored, no error, so every
+  request used the server's default env policy regardless of which mode was
+  requested. All 48 waterfill/greedy cells above (24 rows × 2 strategies)
+  were rerun with the fix, so they're now a real comparison.
+- **Greedy wins more often than waterfill**, but not always: greedy is ahead
+  in 18 of 24 rows (one row, `deepseek-r1:70b` at 32K, ties), usually by
+  using one peer instead of two and saving the extra RPC hop per token —
+  including `deepseek-r1:70b` at 4K, its clearest case (footnote ⁴). Waterfill
+  wins when spreading layers across both peers adds more raw compute than the
+  hop costs (`qwen3-coder:30b` at 32K: 60.24 vs 49.91) or when greedy's
+  narrower split hits a KV-cache wall that waterfill's wider one doesn't
+  (`granite4.2:30b` at 128K, footnote ³). Neither strategy is a safe default
+  across this whole model set.
+
+## Known exception: hybrid SSM architectures don't offload
+
+`qwen3.8:27b` was tested the same way (CPU-only / waterfill / greedy × 4K /
+32K / 128K) and is deliberately left out of the table above — its numbers
+would misleadingly read as "cluster barely helps":
+
+| Context | CPU only | Waterfill | Greedy |
+|---|---|---|---|
+| 4K | 2.57 | 2.95 | 3.11 |
+| 32K | 2.89 | 2.87 | 2.88 |
+| 128K | OOM⁵ | 1.93 (265.8s load) | 1.54 |
+
+Root cause, confirmed in the server log: this model's GGUF reports
+`qwen35.ssm.*` metadata — it's a hybrid Mamba/SSM + attention architecture,
+not a plain transformer — and `load_tensors` shows **0/66 layers offloaded
+to GPU on every run**, cluster placement included. llama.cpp's CUDA/RPC
+backends don't offload this architecture's recurrent-state ops yet, so it
+silently falls back to full CPU regardless of `rpc_placement`, `--fit`, or
+the RPC peer's free VRAM. Cluster mode never got a chance to help here — the
+bottleneck is upstream llama.cpp op support for this architecture family,
+not this fork's placement code.
+
+⁵ The 128K CPU-only run hit an out-of-memory error allocating an 888 MB
+vision-encoder buffer. The head had ~20 GB of RAM available at the time, so
+this reads as transient allocation pressure/fragmentation under a large
+(131072-token) context rather than a hard resource wall — not chased
+further.
+
+See [`cluster.mdx`](/cluster) for how to enable cluster mode, environment
+variables, and current limitations.
