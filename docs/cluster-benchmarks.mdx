@@ -159,5 +159,27 @@ this reads as transient allocation pressure/fragmentation under a large
 (131072-token) context rather than a hard resource wall — not chased
 further.
 
+## Open questions
+
+The numbers above raise two things we don't yet have a root cause for:
+
+- **Why greedy usually beats waterfill.** Greedy wins 18 of 24 measured
+  rows, generally by using fewer RPC peers and saving the extra network hop
+  per token — but waterfill wins when spreading layers across peers adds
+  more raw compute than the hop costs, and one model (`granite4.2:30b`) hits
+  a KV-cache-driven cliff under greedy specifically at long context. Our
+  working theory is that greedy's placement heuristic doesn't account for
+  per-request KV cache growth, but we haven't instrumented the placement
+  code to confirm it.
+- **Why `qwen3.8:27b` never offloads.** We've confirmed the symptom
+  (`load_tensors` logs 0/66 layers offloaded on every run, cluster or not)
+  and a plausible cause (missing CUDA/RPC op support for this architecture's
+  recurrent-state ops), but haven't traced it to a specific missing op in
+  `ggml-rpc.cpp` or filed it upstream.
+
+Further testing (varying KV cache size independently of context, and
+bisecting `qwen3.8`'s op graph) is needed before either can be called
+understood rather than just observed.
+
 See [`cluster.mdx`](/cluster) for how to enable cluster mode, environment
 variables, and current limitations.
