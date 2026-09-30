@@ -3,11 +3,11 @@
 # fork of Ollama adding LAN GPU pooling via llama.cpp RPC -- see the
 # README's Cluster section) on Linux and macOS.
 #
-# It is upstream Ollama's scripts/install.sh with three changes, kept small
+# It is upstream Ollama's scripts/install.sh with two changes, kept small
 # so upstream merges stay easy: downloads come from this fork's GitHub
-# Releases instead of ollama.com; OLLAMA_VERSION picks a release tag
-# instead of a ?version= query; and macOS installs the CLI tarball instead
-# of Ollama.app (this fork ships no signed app -- see docs/releasing.md).
+# Releases instead of ollama.com, and OLLAMA_VERSION picks a release tag
+# instead of a ?version= query. macOS installs signed Ollama.app the same
+# way upstream does -- see docs/releasing.md.
 # The Linux GPU detection and driver setup below are upstream's, unchanged.
 
 # Wrap script in main function so that a truncated partial download doesn't end
@@ -62,7 +62,7 @@ VER_PARAM=""
 ###########################################
 
 if [ "$OS" = "Darwin" ]; then
-    NEEDS=$(require curl tar)
+    NEEDS=$(require curl unzip)
     if [ -n "$NEEDS" ]; then
         status "ERROR: The following tools are required but missing:"
         for NEED in $NEEDS; do
@@ -71,30 +71,40 @@ if [ "$OS" = "Darwin" ]; then
         exit 1
     fi
 
-    SUDO=
-    if [ "$(id -u)" -ne 0 ]; then
-        SUDO="sudo"
+    DOWNLOAD_URL="${RELEASE_BASE}/Ollama-darwin.zip"
+
+    if pgrep -x Ollama >/dev/null 2>&1; then
+        status "Stopping running Ollama instance..."
+        pkill -x Ollama 2>/dev/null || true
+        sleep 2
     fi
 
-    # Same bin/ + lib/ollama layout as Linux (ml/path.go looks in
-    # exeDir/../lib/ollama on macOS too).
-    OLLAMA_INSTALL_DIR=/usr/local
-    if [ -L "$OLLAMA_INSTALL_DIR/bin/ollama" ] && readlink "$OLLAMA_INSTALL_DIR/bin/ollama" | grep -q "Ollama.app"; then
-        warning "Replacing the stock Ollama.app 'ollama' command in $OLLAMA_INSTALL_DIR/bin with ollama-cluster's. The app itself is left installed; quit it before running 'ollama serve' (both use port 11434)."
+    if [ -d "/Applications/Ollama.app" ]; then
+        status "Removing existing Ollama installation..."
+        rm -rf "/Applications/Ollama.app"
     fi
-    if [ -d "$OLLAMA_INSTALL_DIR/lib/ollama" ] ; then
-        status "Cleaning up old version at $OLLAMA_INSTALL_DIR/lib/ollama"
-        $SUDO rm -rf "$OLLAMA_INSTALL_DIR/lib/ollama"
-    fi
-    $SUDO mkdir -p "$OLLAMA_INSTALL_DIR/bin" "$OLLAMA_INSTALL_DIR/lib/ollama"
-    $SUDO rm -f "$OLLAMA_INSTALL_DIR/bin/ollama"
 
-    status "Downloading ollama-darwin.tgz"
+    status "Downloading Ollama for macOS..."
     curl --fail --show-error --location --progress-bar \
-        "${RELEASE_BASE}/ollama-darwin.tgz" | \
-        $SUDO tar -xzf - -C "$OLLAMA_INSTALL_DIR"
+        -o "$TEMP_DIR/Ollama-darwin.zip" "$DOWNLOAD_URL"
 
-    status 'Install complete. Run "ollama serve", then "ollama" from the command line.'
+    status "Installing Ollama to /Applications..."
+    unzip -q "$TEMP_DIR/Ollama-darwin.zip" -d "$TEMP_DIR"
+    mv "$TEMP_DIR/Ollama.app" "/Applications/"
+
+    if [ ! -L "/usr/local/bin/ollama" ] || [ "$(readlink "/usr/local/bin/ollama")" != "/Applications/Ollama.app/Contents/Resources/ollama" ]; then
+        status "Adding 'ollama' command to PATH (may require password)..."
+        mkdir -p "/usr/local/bin" 2>/dev/null || sudo mkdir -p "/usr/local/bin"
+        ln -sf "/Applications/Ollama.app/Contents/Resources/ollama" "/usr/local/bin/ollama" 2>/dev/null || \
+            sudo ln -sf "/Applications/Ollama.app/Contents/Resources/ollama" "/usr/local/bin/ollama"
+    fi
+
+    if [ -z "${OLLAMA_NO_START:-}" ]; then
+        status "Starting Ollama..."
+        open -a Ollama --args hidden
+    fi
+
+    status "Install complete. You can now run 'ollama'."
     exit 0
 fi
 

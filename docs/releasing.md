@@ -111,13 +111,13 @@ Linux):
   use macOS also asks whether Ollama may find devices on your local
   network; cluster mode needs that allowed.
 
-`scripts/install.sh` is upstream's script with only three changes
+`scripts/install.sh` is upstream's script with only two changes
 (documented at its top): it downloads from
 `https://github.com/borism/ollama-cluster/releases/...` instead of
-`ollama.com`, `OLLAMA_VERSION` picks a release tag
-(`releases/download/vX.Y.Z/...`, otherwise `releases/latest/download/...`),
-and on macOS it installs the CLI tarball, not `Ollama.app` (download
-`Ollama-darwin.zip` for that).
+`ollama.com`, and `OLLAMA_VERSION` picks a release tag
+(`releases/download/vX.Y.Z/...`, otherwise `releases/latest/download/...`).
+On macOS it installs `Ollama.app` to `/Applications` and starts it the
+same way upstream's script does, now that this fork ships a signed app.
 Everything else -- detecting NVIDIA/AMD/Jetson hardware, fetching the
 matching extra, setting up NVIDIA drivers and the systemd service -- is
 upstream's, unchanged. `releases/latest` never resolves to a
