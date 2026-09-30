@@ -251,6 +251,15 @@ _build_macapp() {
         exit 1
     fi
 
+    # The self-hosted runner clones a fresh VM per job, so there's no
+    # persistent npm cache -- every run does these installs cold. A brief
+    # network blip on that connection (seen as both ECONNRESET and
+    # ETIMEDOUT) otherwise aborts the whole ~40min job; give npm more
+    # retry headroom to ride it out (defaults: 2 retries, 10s-60s backoff).
+    export npm_config_fetch_retries=5
+    export npm_config_fetch_retry_mintimeout=20000
+    export npm_config_fetch_retry_maxtimeout=120000
+
     if ! command -v tsc &> /dev/null; then
         echo "Installing TypeScript compiler..."
         npm install -g typescript
