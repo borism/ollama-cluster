@@ -1597,72 +1597,67 @@ didCompleteWithError:(NSError *)error {
              atStart:YES];
 }
 
-// Team ID of the running app's signature; "adhoc" when there is none.
-static NSString *currentTeamIdentifier(void) {
-    NSString *team = nil;
-    SecCodeRef code = NULL;
-    CFDictionaryRef info = NULL;
-    if (SecCodeCopySelf(kSecCSDefaultFlags, &code) == errSecSuccess &&
-        SecCodeCopySigningInformation(code, kSecCSSigningInformation, &info) == errSecSuccess) {
-        team = [(__bridge NSDictionary *)info objectForKey:(__bridge NSString *)kSecCodeInfoTeamIdentifier];
-    }
-    if (info) CFRelease(info);
-    if (code) CFRelease(code);
-    return team ?: @"adhoc";
-}
+// Plain LaunchAgent under ~/Library/LaunchAgents, not SMAppService: BTM pins an
+// SMAppService agent to the signing team of the app record that first registered it and
+// launchd then kills it at login (OS_REASON_CODESIGNING) after a re-sign by another team,
+// e.g. this fork replacing upstream Ollama. A plain plist carries no such constraint, and
+// the toggle under Login Items & Extensions still works. The label must differ from the
+// bundled com.ollama.ollama.plist so the migrated SMAppService job cannot collide with it.
+static NSString *const loginAgentLabel = @"com.ollama.ollama.login";
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 - (void)registerSelfAsLoginItem:(BOOL)firstTimeRun {
-    appLogInfo(@"using v13+ SMAppService for login registration");
-    // Maps to the file Ollama.app/Contents/Library/LaunchAgents/com.ollama.ollama.plist
-    SMAppService* service = [SMAppService agentServiceWithPlistName:@"com.ollama.ollama.plist"];
-    if (!service) {
-        appLogInfo(@"SMAppService failed to find service for com.ollama.ollama.plist");
-        return;
-    }
-    SMAppServiceStatus status = [service status];
-    switch (status) {
-        case SMAppServiceStatusNotRegistered:
-            appLogInfo(@"service not registered, registering now");
-            break;
-        case SMAppServiceStatusEnabled: {
-            // BTM pins the agent to the signing team that first registered it, and
-            // launchd kills the agent at login (OS_REASON_CODESIGNING) if the app is
-            // later re-signed by another team, e.g. this fork replacing upstream Ollama.
-            NSString *team = currentTeamIdentifier();
-            NSString *registered = [[NSUserDefaults standardUserDefaults] stringForKey:@"loginItemTeamID"];
-            if ([team isEqualToString:registered]) {
-                appLogInfo(@"service is already enabled, no need to register again");
-                return;
+    // Migrate away from the SMAppService registration older builds created.
+    SMAppService *old = [SMAppService agentServiceWithPlistName:@"com.ollama.ollama.plist"];
+    if (old) {
+        switch ([old status]) {
+            case SMAppServiceStatusEnabled: {
+                NSError *err = nil;
+                if (![old unregisterAndReturnError:&err]) {
+                    appLogInfo([NSString stringWithFormat:@"Failed to unregister old login item: %@", err]);
+                }
+                break;
             }
-            appLogInfo([NSString stringWithFormat:@"login item was registered under team %@, now %@; re-registering",
-                        registered ?: @"(unknown)", team]);
-            NSError *unregErr = nil;
-            if (![service unregisterAndReturnError:&unregErr]) {
-                appLogInfo([NSString stringWithFormat:@"Failed to unregister stale login item: %@", unregErr]);
+            case SMAppServiceStatusRequiresApproval:
+                // User turned the old login item off; keep that choice.
+                appLogInfo(@"login item was disabled by the user, not registering");
                 return;
-            }
-            break;
+            default:
+                break;
         }
-        case SMAppServiceStatusRequiresApproval: 
-            // User has disabled our login behavior explicitly so leave it as is
-            appLogInfo(@"service is currently disabled and will not start at login");
-            return;
-        case SMAppServiceStatusNotFound:
-            appLogInfo(@"service not found, registering now");
-            break;
-        default:
-            appLogInfo([NSString stringWithFormat:@"unexpected status: %ld", (long)status]);
-            break;
     }
-    NSError *error = nil;
-    if (![service registerAndReturnError:&error]) {
-        appLogInfo([NSString stringWithFormat:@"Failed to register %@ as a login item: %@", NSBundle.mainBundle.bundleURL, error]);
+
+    NSString *exe = [NSBundle.mainBundle.bundlePath
+        stringByAppendingPathComponent:@"Contents/Frameworks/Squirrel.framework/Versions/A/Squirrel"];
+    NSString *dir = [NSHomeDirectory() stringByAppendingPathComponent:@"Library/LaunchAgents"];
+    NSString *path = [dir stringByAppendingPathComponent:[loginAgentLabel stringByAppendingString:@".plist"]];
+
+    // Only (re)write when missing or pointing at a moved app, so a user's disable in
+    // System Settings (kept by launchd, keyed on the label) is never undone.
+    NSArray *args = [NSDictionary dictionaryWithContentsOfFile:path][@"ProgramArguments"];
+    if (args.count > 0 && [args[0] isEqualToString:exe]) {
+        appLogInfo(@"login agent already registered, no need to register again");
         return;
     }
-    [[NSUserDefaults standardUserDefaults] setObject:currentTeamIdentifier() forKey:@"loginItemTeamID"];
-    return;
+
+    NSDictionary *plist = @{
+        @"Label": loginAgentLabel,
+        @"ProgramArguments": @[exe, @"background"],
+        @"RunAtLoad": @YES,
+        @"LimitLoadToSessionType": @"Aqua",
+        @"POSIXSpawnType": @"Interactive",
+    };
+    NSError *error = nil;
+    if (![[NSFileManager defaultManager] createDirectoryAtPath:dir
+                                   withIntermediateDirectories:YES
+                                                    attributes:nil
+                                                         error:&error] ||
+        ![plist writeToURL:[NSURL fileURLWithPath:path] error:&error]) {
+        appLogInfo([NSString stringWithFormat:@"Failed to register login agent %@: %@", path, error]);
+        return;
+    }
+    appLogInfo([NSString stringWithFormat:@"registered login agent %@", path]);
 }
 
 /// Remove ollama from the deprecated Login Items list as we now use LaunchAgents
