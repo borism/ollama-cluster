@@ -1597,6 +1597,20 @@ didCompleteWithError:(NSError *)error {
              atStart:YES];
 }
 
+// Team ID of the running app's signature; "adhoc" when there is none.
+static NSString *currentTeamIdentifier(void) {
+    NSString *team = nil;
+    SecCodeRef code = NULL;
+    CFDictionaryRef info = NULL;
+    if (SecCodeCopySelf(kSecCSDefaultFlags, &code) == errSecSuccess &&
+        SecCodeCopySigningInformation(code, kSecCSSigningInformation, &info) == errSecSuccess) {
+        team = [(__bridge NSDictionary *)info objectForKey:(__bridge NSString *)kSecCodeInfoTeamIdentifier];
+    }
+    if (info) CFRelease(info);
+    if (code) CFRelease(code);
+    return team ?: @"adhoc";
+}
+
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 - (void)registerSelfAsLoginItem:(BOOL)firstTimeRun {
@@ -1612,9 +1626,25 @@ didCompleteWithError:(NSError *)error {
         case SMAppServiceStatusNotRegistered:
             appLogInfo(@"service not registered, registering now");
             break;
-        case SMAppServiceStatusEnabled:
-            appLogInfo(@"service is already enabled, no need to register again");
-            return;
+        case SMAppServiceStatusEnabled: {
+            // BTM pins the agent to the signing team that first registered it, and
+            // launchd kills the agent at login (OS_REASON_CODESIGNING) if the app is
+            // later re-signed by another team, e.g. this fork replacing upstream Ollama.
+            NSString *team = currentTeamIdentifier();
+            NSString *registered = [[NSUserDefaults standardUserDefaults] stringForKey:@"loginItemTeamID"];
+            if ([team isEqualToString:registered]) {
+                appLogInfo(@"service is already enabled, no need to register again");
+                return;
+            }
+            appLogInfo([NSString stringWithFormat:@"login item was registered under team %@, now %@; re-registering",
+                        registered ?: @"(unknown)", team]);
+            NSError *unregErr = nil;
+            if (![service unregisterAndReturnError:&unregErr]) {
+                appLogInfo([NSString stringWithFormat:@"Failed to unregister stale login item: %@", unregErr]);
+                return;
+            }
+            break;
+        }
         case SMAppServiceStatusRequiresApproval: 
             // User has disabled our login behavior explicitly so leave it as is
             appLogInfo(@"service is currently disabled and will not start at login");
@@ -1631,6 +1661,7 @@ didCompleteWithError:(NSError *)error {
         appLogInfo([NSString stringWithFormat:@"Failed to register %@ as a login item: %@", NSBundle.mainBundle.bundleURL, error]);
         return;
     }
+    [[NSUserDefaults standardUserDefaults] setObject:currentTeamIdentifier() forKey:@"loginItemTeamID"];
     return;
 }
 
