@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/borism/ollama-cluster/api"
 	"github.com/borism/ollama-cluster/decision"
 	gguftest "github.com/borism/ollama-cluster/internal/testutil/gguf"
@@ -20,6 +19,7 @@ import (
 	"github.com/borism/ollama-cluster/manifest"
 	"github.com/borism/ollama-cluster/ml"
 	"github.com/borism/ollama-cluster/types/model"
+	"github.com/gin-gonic/gin"
 )
 
 type systemOneTestRunner struct {
