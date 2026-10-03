@@ -2206,7 +2206,8 @@ func TestCreateSafetensorsRejectsMissingBlob(t *testing.T) {
 func TestWriteSafetensorsManifestPreservesRequestMetadata(t *testing.T) {
 	t.Setenv("OLLAMA_MODELS", t.TempDir())
 	r := api.CreateRequest{
-		Model: "uploaded-safetensors",
+		Model:        "uploaded-safetensors",
+		Capabilities: []string{"decision", "completion", "decision"},
 		Info: map[string]any{
 			"capabilities": []string{"completion", "thinking"},
 		},
@@ -2243,8 +2244,8 @@ func TestWriteSafetensorsManifestPreservesRequestMetadata(t *testing.T) {
 	if cfg.Requires != "0.20.0" {
 		t.Fatalf("Requires = %q, want 0.20.0", cfg.Requires)
 	}
-	if !slices.Contains(cfg.Capabilities, "completion") || !slices.Contains(cfg.Capabilities, "thinking") {
-		t.Fatalf("Capabilities = %v, want completion and thinking", cfg.Capabilities)
+	if want := []string{"completion", "thinking", "decision"}; !slices.Equal(cfg.Capabilities, want) {
+		t.Fatalf("Capabilities = %v, want %v", cfg.Capabilities, want)
 	}
 
 	mf, err := manifest.ParseNamedManifest(model.ParseName("uploaded-safetensors"))
@@ -2955,5 +2956,30 @@ func TestCreateFromSafetensorsModel_PreservesLayerNames(t *testing.T) {
 	}
 	if !jsonNames["tokenizer.json"] {
 		t.Error("tokenizer.json layer name not preserved in derived model")
+	}
+}
+
+func TestCreateClefDecisionHead(t *testing.T) {
+	t.Setenv("OLLAMA_MODELS", t.TempDir())
+	_, digest := createBinFile(t, gguftest.KV{
+		"general.architecture": "qwen35",
+		"qwen35.decision.type": "clef",
+	}, nil)
+	s := &Server{}
+	for _, req := range []api.CreateRequest{
+		{Model: "custom-decision", Files: map[string]string{"model.gguf": digest}, Stream: &stream},
+		{Model: "copied-decision", From: "custom-decision", Stream: &stream},
+	} {
+		w := createRequest(t, s.CreateHandler, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("create: %d %s", w.Code, w.Body)
+		}
+		m, err := GetModel(req.Model)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if m.metadata.String("decision.type") != "clef" || !slices.Contains(m.Capabilities(), model.CapabilityDecision) {
+			t.Fatalf("encoding/capability not preserved: %+v", m.Config)
+		}
 	}
 }
