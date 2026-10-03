@@ -153,7 +153,7 @@ _merge_darwin_payload() {
             case "$BASE" in
                 llama-server|llama-quantize|ggml-rpc-server|mlx_*) continue ;;
             esac
-            [ -e "dist/darwin/lib/ollama/$BASE" ] || cp -P "$F" dist/darwin/lib/ollama/
+            [ -e "dist/darwin/lib/ollama/$BASE" ] || cp -RP "$F" dist/darwin/lib/ollama/
         done
     done
 
@@ -228,7 +228,7 @@ _package_darwin_runtime() {
 _sign_darwin() {
     _prepare_darwin_runtime
     if [ -n "$APPLE_IDENTITY" ]; then
-        for F in dist/darwin/ollama dist/darwin/llama-server dist/darwin/llama-quantize dist/darwin/lib/ollama/* dist/darwin/lib/ollama/mlx_metal_v*/*; do
+        for F in dist/darwin/ollama dist/darwin/llama-server dist/darwin/llama-quantize dist/darwin/lib/ollama/* dist/darwin/lib/ollama/mlx_metal_v*/* dist/darwin/lib/ollama/vulkan/*; do
             [ -f "$F" ] && [ ! -L "$F" ] || continue
             case "$F" in *_LICENSE|*_NOTICE) continue ;; esac
             codesign -f --timestamp -s "$APPLE_IDENTITY" --identifier ai.ollama.ollama --options=runtime "$F"
@@ -237,7 +237,7 @@ _sign_darwin() {
         # create a temporary zip for notarization
         TEMP=$(mktemp -u).zip
         ditto -c -k --keepParent dist/darwin/ollama "$TEMP"
-        xcrun notarytool submit "$TEMP" --wait --timeout 20m --apple-id $APPLE_ID --password $APPLE_PASSWORD --team-id $APPLE_TEAM_ID
+        xcrun notarytool submit "$TEMP" --wait --timeout 20m --key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER_ID"
         rm -f "$TEMP"
     fi
 
@@ -250,6 +250,15 @@ _build_macapp() {
         echo "   Visit: https://nodejs.org/"
         exit 1
     fi
+
+    # The self-hosted runner clones a fresh VM per job, so there's no
+    # persistent npm cache -- every run does these installs cold. A brief
+    # network blip on that connection (seen as both ECONNRESET and
+    # ETIMEDOUT) otherwise aborts the whole ~40min job; give npm more
+    # retry headroom to ride it out (defaults: 2 retries, 10s-60s backoff).
+    export npm_config_fetch_retries=5
+    export npm_config_fetch_retry_mintimeout=20000
+    export npm_config_fetch_retry_maxtimeout=120000
 
     if ! command -v tsc &> /dev/null; then
         echo "Installing TypeScript compiler..."
@@ -306,7 +315,13 @@ _build_macapp() {
         codesign -f --timestamp -s "$APPLE_IDENTITY" --identifier ai.ollama.ollama --options=runtime dist/Ollama.app/Contents/Resources/ollama
         codesign -f --timestamp -s "$APPLE_IDENTITY" --identifier ai.ollama.ollama --options=runtime dist/Ollama.app/Contents/Resources/llama-server
         codesign -f --timestamp -s "$APPLE_IDENTITY" --identifier ai.ollama.ollama --options=runtime dist/Ollama.app/Contents/Resources/llama-quantize
-        for lib in dist/Ollama.app/Contents/Resources/*.so dist/Ollama.app/Contents/Resources/*.dylib dist/Ollama.app/Contents/Resources/*.metallib dist/Ollama.app/Contents/Resources/mlx_metal_v*/*.dylib dist/Ollama.app/Contents/Resources/mlx_metal_v*/*.metallib dist/Ollama.app/Contents/Resources/mlx_metal_v*/*.so; do
+        # ggml-rpc-server (cluster RPC worker) and vulkan/ (amd64 Vulkan
+        # backend) are this fork's own additions on top of upstream's
+        # payload layout -- neither matches the glob below, so notarization
+        # rejects the bundle with "The binary is not signed" if they're
+        # left out. Sign them explicitly.
+        [ -f dist/Ollama.app/Contents/Resources/ggml-rpc-server ] && codesign -f --timestamp -s "$APPLE_IDENTITY" --identifier ai.ollama.ollama --options=runtime dist/Ollama.app/Contents/Resources/ggml-rpc-server
+        for lib in dist/Ollama.app/Contents/Resources/*.so dist/Ollama.app/Contents/Resources/*.dylib dist/Ollama.app/Contents/Resources/*.metallib dist/Ollama.app/Contents/Resources/mlx_metal_v*/*.dylib dist/Ollama.app/Contents/Resources/mlx_metal_v*/*.metallib dist/Ollama.app/Contents/Resources/mlx_metal_v*/*.so dist/Ollama.app/Contents/Resources/vulkan/*.so dist/Ollama.app/Contents/Resources/vulkan/*.dylib; do
             [ -f "$lib" ] || continue
             codesign -f --timestamp -s "$APPLE_IDENTITY" --identifier ai.ollama.ollama --options=runtime "$lib"
         done
@@ -326,14 +341,20 @@ _build_macapp() {
 
     # Notarize and Staple
     if [ -n "$APPLE_IDENTITY" ]; then
-        $(xcrun -f notarytool) submit dist/Ollama-darwin.zip --wait --timeout 20m --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID"
+        $(xcrun -f notarytool) submit dist/Ollama-darwin.zip --wait --timeout 20m --key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER_ID"
         rm -f dist/Ollama-darwin.zip
         $(xcrun -f stapler) staple dist/Ollama.app
         ditto -c -k --norsrc --keepParent dist/Ollama.app dist/Ollama-darwin.zip
 
         rm -f dist/Ollama.dmg
 
+        # --skip-jenkins: our self-hosted runner boots the VM headless (no
+        # GUI login session), so create-dmg's Finder-prettifying AppleScript
+        # times out waiting for AppleEvents ("Finder got an error: AppleEvent
+        # timed out"). Skipping it means the .dmg lacks the nice icon
+        # layout/background but still installs fine.
         (cd dist && ../scripts/create-dmg.sh \
+            --skip-jenkins \
             --volname "${VOL_NAME}" \
             --volicon ../app/darwin/Ollama.app/Contents/Resources/icon.icns \
             --background ../app/assets/background.png \
@@ -350,7 +371,7 @@ _build_macapp() {
         rm -f dist/rw*.dmg
 
         codesign -f --timestamp -s "$APPLE_IDENTITY" --identifier ai.ollama.ollama --options=runtime dist/Ollama.dmg
-        $(xcrun -f notarytool) submit dist/Ollama.dmg --wait --timeout 20m --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID"
+        $(xcrun -f notarytool) submit dist/Ollama.dmg --wait --timeout 20m --key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER_ID"
         $(xcrun -f stapler) staple dist/Ollama.dmg
     else
         echo "WARNING: Code signing disabled, this bundle will not work for upgrade testing"

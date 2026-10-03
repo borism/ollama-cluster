@@ -11,6 +11,17 @@ list.
 
 This is off by default and opt-in per machine.
 
+The scaling axis is model size, not request throughput: one head still
+drives each request (see [How it's different from
+EXO](#how-its-different-from-exo) below), but that model's layers can
+spread across as many peers' free VRAM as it takes, on whatever backend
+each peer happens to run. Scale out with more/older machines instead of
+up with one bigger, matching GPU.
+
+Peers don't need matching hardware: `ollama cluster ls` reports each
+machine's actual backend and free VRAM, measured live, and placement uses
+that instead of assuming a homogeneous rack.
+
 ## How it's different from EXO
 
 If you've used [EXO](https://github.com/exo-explore/exo): the peer-discovery

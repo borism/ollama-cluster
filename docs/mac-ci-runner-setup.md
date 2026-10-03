@@ -16,7 +16,7 @@ There are two images, one built on the other:
   `scripts/mac-ci/ephemeral-darwin-runner.sh` clones for every release.
 
 **Over SSH, the external volume is blocked by default** (`Operation not
-permitted` on anything under `/Volumes/T9`, even though `df` works) — macOS
+permitted` on anything under `/Volumes/BuildDisk`, even though `df` works) — macOS
 privacy controls don't cover remote sessions unless you opt in. Rebooting
 doesn't fix it, and granting Full Disk Access to `sshd` doesn't either. The
 fix: System Settings → General → Sharing → Remote Login (ⓘ) → **Allow full
@@ -30,10 +30,10 @@ Assistant) needs the graphical session regardless.
 Apple Silicon is required (Virtualization.framework macOS guests are
 arm64-only) — this cross-compiles both `amd64`+`arm64` from one host, the
 same way GitHub's own `macos-26-xlarge` (also Apple Silicon) does today.
-The VM images live on an external SSD (`/Volumes/T9`, case-sensitive APFS —
-required for Tart's copy-on-write cloning) because the internal disk didn't
-have enough free space for a macOS+Xcode image (needs 80-100GB+; check with
-`df -h /Volumes/T9` before starting, and again after step 2 completes).
+The VM images live on an external SSD (`/Volumes/BuildDisk`, case-sensitive
+APFS — required for Tart's copy-on-write cloning), since a macOS+Xcode image
+needs 80-100GB+ and an internal disk often can't spare that; check with
+`df -h /Volumes/BuildDisk` before starting, and again after step 2 completes).
 
 ## Security: read this before registering anything
 
@@ -51,14 +51,14 @@ Download it from <https://github.com/openai/tart/releases/latest>
 (`tart.tar.gz`, verify against the release's checksums file).
 
 ```shell
-mkdir -p /Volumes/T9/tart-home/bin
-mv tart.app /Volumes/T9/tart-home/bin/   # from wherever you extracted it
-export TART_HOME=/Volumes/T9/tart-home
+mkdir -p /Volumes/BuildDisk/tart-home/bin
+mv tart.app /Volumes/BuildDisk/tart-home/bin/   # from wherever you extracted it
+export TART_HOME=/Volumes/BuildDisk/tart-home
 alias tart="$TART_HOME/bin/tart.app/Contents/MacOS/tart"
 tart --version
 ```
 
-Add `export TART_HOME=/Volumes/T9/tart-home` to your shell profile
+Add `export TART_HOME=/Volumes/BuildDisk/tart-home` to your shell profile
 (`~/.bash_profile` — Terminal.app runs bash as a login shell by default,
 not `~/.bashrc`) so it's always set — every `tart` command below, and
 `scripts/mac-ci/ephemeral-darwin-runner.sh`, assumes it.
@@ -70,7 +70,7 @@ tart create macos-xcode-golden --from-ipsw=latest --disk-size 100
 ```
 
 Downloads a full macOS installer (multi-GB) and installs it into a new VM
-disk on T9. Takes a while; let it finish. Then give it more than Tart's
+disk on the external volume. Takes a while; let it finish. Then give it more than Tart's
 default 4 CPUs / 4 GB (clones inherit this; GitHub's own macOS runners get
 7 GB+):
 
@@ -252,7 +252,7 @@ tart exec ollama-cluster-darwin-golden bash -lc '
 The Vulkan SDK is for building `llama-server` with `GGML_VULKAN=ON` for
 Intel Macs with an AMD dGPU (`build_darwin.sh`'s `OLLAMA_LLAMA_BACKENDS=vulkan`
 step, amd64 only, when the SDK is present -- verified end to end on real
-mbp-i9-class hardware). LunarG's SDK bundles
+Intel Mac hardware). LunarG's SDK bundles
 MoltenVK, the Vulkan loader, `glslc` and the SPIR-V tools as **universal**
 (x86_64 + arm64) binaries, so the arm64 VM can cross-build x86_64 against
 it. It installs into the user's home directory, no `sudo`. Check the

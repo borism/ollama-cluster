@@ -6,9 +6,12 @@
 
 # Ollama Cluster
 
-Ollama, with LAN-wide GPU pooling: a fork that autodiscovers other instances
-on your network and spills model layers onto their spare GPUs via llama.cpp
-RPC when one machine's VRAM isn't enough.
+Ollama, with horizontal scaling for open-weight models: a fork that pools
+GPU capacity across heterogeneous machines on your LAN — CUDA, Vulkan,
+Metal, ROCm, any mix — so a model too big for one box's VRAM runs by
+adding machines instead of a bigger one. Autodiscovers peers, measures
+their free capacity, and spills model layers onto whoever has room, via
+llama.cpp RPC.
 
 ## Cluster mode (experimental)
 
@@ -70,13 +73,13 @@ per-request overrides, and current limitations.
 
 ## Download
 
-**No release has shipped yet.** `scripts/install.sh` is ready and pulls
-from this fork's own [GitHub Releases](https://github.com/borism/ollama-cluster/releases)
-(not ollama.com), but no tag has been published -- see
-[`docs/releasing.md`](docs/releasing.md) for the release pipeline's
-scope, current gaps, and how to cut one.
+**[v0.34.4-cluster.2](https://github.com/borism/ollama-cluster/releases/tag/v0.34.4-cluster.2)**
+is published. `scripts/install.sh` pulls from this fork's own
+[GitHub Releases](https://github.com/borism/ollama-cluster/releases) (not
+ollama.com) -- see [`docs/releasing.md`](docs/releasing.md) for the release
+pipeline's scope, current gaps, and how to cut the next one.
 
-### macOS / Linux (once a release exists)
+### macOS / Linux
 
 ```shell
 curl -fsSL https://raw.githubusercontent.com/borism/ollama-cluster/main/scripts/install.sh | sh
@@ -84,10 +87,12 @@ curl -fsSL https://raw.githubusercontent.com/borism/ollama-cluster/main/scripts/
 
 Linux gets the same GPU backends as stock Ollama (NVIDIA CUDA 12/13,
 Vulkan, AMD ROCm, NVIDIA JetPack), with the installer fetching the
-ROCm/JetPack extras when it detects that hardware; macOS gets Metal on
-Apple Silicon, Vulkan (via MoltenVK) on Intel Macs with an AMD discrete
-GPU, as an unsigned command-line install (no menu-bar app). No Linux
-MLX engine yet -- see `docs/releasing.md`.
+ROCm/JetPack extras when it detects that hardware. macOS gets a
+Developer ID signed and notarized `Ollama.app` (Metal on Apple Silicon,
+Vulkan via MoltenVK on Intel Macs with an AMD discrete GPU) --
+`Ollama-darwin.zip`/`Ollama.dmg` from the release, or the unsigned CLI
+tarball via the installer above. No Linux MLX engine yet -- see
+`docs/releasing.md`.
 
 ### Windows
 
