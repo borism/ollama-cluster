@@ -46,6 +46,7 @@ function settings(
   return {
     enabled: false,
     share: true,
+    share_devices: "",
     seeds: "",
     placement: "waterfill",
     cache_gb: 32,
@@ -159,13 +160,36 @@ describe("ClusterSettings", () => {
     await act(async () => renderer.unmount());
   });
 
-  it("names the GPU in the sharing label when the server knows it", async () => {
+  it("shows one switch per GPU and saves the ones left on", async () => {
+    const devices = [
+      { name: "CUDA0", description: "NVIDIA RTX A4500", total_memory: 2 ** 34 },
+      { name: "CUDA1", description: "NVIDIA RTX A2000", total_memory: 2 ** 33 },
+    ];
     mocks.getClusterSettings.mockResolvedValue(
-      settings({ gpu: "Apple M2 Max GPU" }),
+      settings({ enabled: true, devices }),
     );
+    mocks.updateClusterSettings.mockResolvedValue(settings());
     const renderer = await renderCluster();
 
-    expect(html(renderer)).toContain("Share the Apple M2 Max GPU");
+    expect(html(renderer)).toContain("NVIDIA RTX A2000");
+    const switches = renderer.root.findAllByType(Switch);
+    expect(switches.map((sw) => sw.props.checked)).toEqual([true, true, true]);
+    await act(async () => {
+      switches[1].props.onChange(false);
+      await Promise.resolve();
+    });
+
+    expect(mocks.updateClusterSettings).toHaveBeenCalledWith(
+      settings({ enabled: true, devices, share_devices: "CUDA1" }),
+    );
+    await act(async () => renderer.unmount());
+  });
+
+  it("labels the sharing switch CPU on a machine without a GPU", async () => {
+    mocks.getClusterSettings.mockResolvedValue(settings());
+    const renderer = await renderCluster();
+
+    expect(html(renderer)).toContain("Share this computer's CPU");
     await act(async () => renderer.unmount());
   });
 

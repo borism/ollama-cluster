@@ -105,6 +105,7 @@ export async function applySettingsDefaults({
     currentClusterSettings &&
     (currentClusterSettings.enabled ||
       !currentClusterSettings.share ||
+      currentClusterSettings.share_devices !== "" ||
       currentClusterSettings.seeds !== "" ||
       currentClusterSettings.placement !== "waterfill" ||
       currentClusterSettings.cache_gb !== 32);
@@ -120,6 +121,7 @@ export async function applySettingsDefaults({
       await updateCluster({
         enabled: false,
         share: true,
+        share_devices: "",
         seeds: "",
         placement: "waterfill",
         cache_gb: 32, // OLLAMA_CLUSTER_CACHE_GB's default

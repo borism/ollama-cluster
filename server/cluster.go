@@ -180,8 +180,15 @@ func logClusterPeers(ctx context.Context, table *cluster.Table) {
 	}
 }
 
+// localGPUDevices lists this machine's GPUs; a variable so tests can fake it.
+var localGPUDevices = func(ctx context.Context) []ml.DeviceInfo { return discover.GPUDevices(ctx, nil) }
+
 // currentClusterConfig is what GET and POST /api/cluster/config return.
-func currentClusterConfig() api.ClusterConfig {
+func currentClusterConfig(ctx context.Context) api.ClusterConfig {
+	var devices []api.ClusterDevice
+	for _, d := range localGPUDevices(ctx) {
+		devices = append(devices, api.ClusterDevice{Name: d.Name, Description: d.Description, TotalMemory: d.TotalMemory})
+	}
 	return api.ClusterConfig{
 		Enabled:        envconfig.Cluster(),
 		Share:          envconfig.ClusterShare(true),
@@ -191,12 +198,13 @@ func currentClusterConfig() api.ClusterConfig {
 		CacheGB:        envconfig.ClusterCacheGB(),
 		CacheUsedBytes: llm.RPCCacheBytes(envconfig.Models()),
 		Sources:        envconfig.ClusterSources(),
+		Devices:        devices,
 	}
 }
 
 // ClusterConfigHandler returns this instance's cluster-mode settings.
 func (s *Server) ClusterConfigHandler(c *gin.Context) {
-	c.JSON(http.StatusOK, currentClusterConfig())
+	c.JSON(http.StatusOK, currentClusterConfig(c.Request.Context()))
 }
 
 // UpdateClusterConfigHandler saves changed cluster settings in this
@@ -261,7 +269,7 @@ func (s *Server) UpdateClusterConfigHandler(c *gin.Context) {
 	if s.cluster != nil {
 		s.cluster.apply()
 	}
-	c.JSON(http.StatusOK, currentClusterConfig())
+	c.JSON(http.StatusOK, currentClusterConfig(c.Request.Context()))
 }
 
 // requestFromLoopback reports whether r's TCP peer is a loopback address.

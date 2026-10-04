@@ -27,6 +27,13 @@ func clusterTestHome(t *testing.T) {
 	}
 	envconfig.ReloadServerConfig()
 	t.Cleanup(envconfig.ReloadServerConfig)
+
+	// No real GPU discovery in tests.
+	orig := localGPUDevices
+	localGPUDevices = func(context.Context) []ml.DeviceInfo {
+		return []ml.DeviceInfo{{Name: "CUDA0", Description: "Test GPU", TotalMemory: 8 << 30}}
+	}
+	t.Cleanup(func() { localGPUDevices = orig })
 }
 
 // fakeClusterRunner counts starts and stops instead of binding real ports.
@@ -116,6 +123,9 @@ func TestUpdateClusterConfigHandler(t *testing.T) {
 	}
 	if !got.Enabled || got.Sources["enabled"] != "config" || *starts != 1 {
 		t.Errorf("after on: %+v, starts=%d; want enabled from config, started once", got, *starts)
+	}
+	if len(got.Devices) != 1 || got.Devices[0].Name != "CUDA0" || got.Devices[0].Description != "Test GPU" || got.Devices[0].TotalMemory != 8<<30 {
+		t.Errorf("devices = %+v, want the one local GPU", got.Devices)
 	}
 }
 

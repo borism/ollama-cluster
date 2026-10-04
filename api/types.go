@@ -899,6 +899,9 @@ type ClusterConfig struct {
 	// environment, which always wins), "config" (the server's
 	// ~/.ollama/server.json, which POST writes) or "default".
 	Sources map[string]string `json:"sources"`
+	// Devices is this machine's GPUs, whose Name is what ShareDevices
+	// takes. Read-only: POST ignores it.
+	Devices []ClusterDevice `json:"devices"`
 }
 
 // ClusterConfigRequest changes the cluster settings it sets; nil fields
@@ -939,7 +942,10 @@ type ClusterPeer struct {
 
 // ClusterDevice is one GPU (or CPU) a [ClusterPeer] reports as available.
 type ClusterDevice struct {
-	Name        string `json:"name"`
+	Name string `json:"name"`
+	// Description is the GPU's marketing name; only set in
+	// [ClusterConfig.Devices].
+	Description string `json:"description,omitempty"`
 	TotalMemory uint64 `json:"total_memory"`
 	FreeMemory  uint64 `json:"free_memory"`
 }
