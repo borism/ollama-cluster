@@ -1,7 +1,8 @@
 #import "cluster_menu_darwin.h"
 
+static NSMenu *clusterMenu;
 static NSMenuItem *clusterModeItem;
-static NSMenuItem *clusterShareItem;
+static NSMutableArray<NSMenuItem *> *clusterShareItems;
 static NSMenuItem *clusterPlacementItem;
 static NSMenuItem *clusterWaterfillItem;
 static NSMenuItem *clusterGreedyItem;
@@ -41,8 +42,7 @@ static NSString *clusterToolTip(bool on, bool locked, NSString *envVar) {
     [menu addItem:[NSMenuItem separatorItem]];
     clusterModeItem = clusterItem(@"Cluster Mode", @selector(toggleClusterMode:), self);
     [menu addItem:clusterModeItem];
-    clusterShareItem = clusterItem(@"Share This Computer's GPU", @selector(toggleClusterShare:), self);
-    [menu addItem:clusterShareItem];
+    clusterShareItems = [[NSMutableArray alloc] init]; // filled in by refreshClusterMenuState
 
     // OLLAMA_CLUSTER_PLACEMENT: a pick-one submenu, checkmarked like any other.
     NSMenu *placement = [[NSMenu alloc] init];
@@ -59,6 +59,7 @@ static NSString *clusterToolTip(bool on, bool locked, NSString *envVar) {
     clusterPlacementItem = [[NSMenuItem alloc] initWithTitle:@"Placement" action:nil keyEquivalent:@""];
     [clusterPlacementItem setSubmenu:placement];
     [menu addItem:clusterPlacementItem];
+    clusterMenu = menu;
 
     [self refreshClusterMenuState];
 }
@@ -71,15 +72,32 @@ static NSString *clusterToolTip(bool on, bool locked, NSString *envVar) {
     BOOL reachable = ClusterMenuState(&enabled, &share, &greedy, &enabledLocked, &shareLocked, &placementLocked);
 
     [clusterModeItem setState:enabled ? NSControlStateValueOn : NSControlStateValueOff];
-    [clusterShareItem setState:share ? NSControlStateValueOn : NSControlStateValueOff];
     [clusterModeItem setToolTip:clusterToolTip(enabled, enabledLocked, @"OLLAMA_CLUSTER")];
-    [clusterShareItem setToolTip:clusterToolTip(share, shareLocked, @"OLLAMA_CLUSTER_SHARE")];
     [clusterPlacementItem setToolTip:placementLocked ? @"Set by the OLLAMA_CLUSTER_PLACEMENT environment variable" : nil];
-    char *gpu = ClusterGPUName();
-    NSString *gpuName = [NSString stringWithUTF8String:gpu];
-    free(gpu);
-    [clusterShareItem setTitle:gpuName.length ? [@"Share the " stringByAppendingString:gpuName]
-                                              : @"Share This Computer's GPU"];
+
+    // One switch per GPU, rebuilt each time as GPUs and share_devices can change.
+    NSInteger at = [clusterMenu indexOfItem:clusterModeItem] + 1;
+    for (NSMenuItem *old in clusterShareItems) {
+        [clusterMenu removeItem:old];
+    }
+    [clusterShareItems removeAllObjects];
+    char *lines = ClusterShareItems();
+    for (NSString *line in [[NSString stringWithUTF8String:lines] componentsSeparatedByString:@"\n"]) {
+        NSArray<NSString *> *f = [line componentsSeparatedByString:@"\t"];
+        if (f.count != 3) {
+            continue;
+        }
+        NSMenuItem *item = clusterItem(f[1], @selector(toggleClusterShare:), self);
+        [item setRepresentedObject:f[0]];
+        BOOL on = [f[2] isEqualToString:@"1"];
+        [item setState:on ? NSControlStateValueOn : NSControlStateValueOff];
+        [item setToolTip:clusterToolTip(on, shareLocked, @"OLLAMA_CLUSTER_SHARE or OLLAMA_CLUSTER_SHARE_DEVICES")];
+        [item setEnabled:reachable && enabled && !shareLocked];
+        [clusterMenu insertItem:item atIndex:at++];
+        [clusterShareItems addObject:item];
+        [item release]; // clusterItem returns it owned; the menu and the array hold it now
+    }
+    free(lines);
     [clusterWaterfillItem setState:greedy ? NSControlStateValueOff : NSControlStateValueOn];
     [clusterGreedyItem setState:greedy ? NSControlStateValueOn : NSControlStateValueOff];
 
@@ -87,7 +105,6 @@ static NSString *clusterToolTip(bool on, bool locked, NSString *envVar) {
     // (same as Settings). Nothing is clickable until the server answers,
     // or when an environment variable decides the setting.
     [clusterModeItem setEnabled:reachable && !enabledLocked];
-    [clusterShareItem setEnabled:reachable && enabled && !shareLocked];
     [clusterPlacementItem setEnabled:reachable && enabled && !placementLocked];
 }
 
@@ -97,7 +114,7 @@ static NSString *clusterToolTip(bool on, bool locked, NSString *envVar) {
 }
 
 - (void)toggleClusterShare:(NSMenuItem *)sender {
-    SetClusterShareEnabled([sender state] != NSControlStateValueOn);
+    ToggleClusterShare((char *)[(NSString *)[sender representedObject] UTF8String]);
     [self refreshClusterMenuState];
 }
 

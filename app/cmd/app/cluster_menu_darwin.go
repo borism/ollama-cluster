@@ -4,6 +4,8 @@ package main
 import "C"
 
 import (
+	"strings"
+
 	"github.com/borism/ollama-cluster/api"
 	"github.com/borism/ollama-cluster/app/server"
 )
@@ -22,7 +24,7 @@ func ClusterMenuState(enabled, share, greedy, enabledLocked, shareLocked, placem
 	*share = C.bool(cfg.Share)
 	*greedy = C.bool(cfg.Placement == "greedy")
 	*enabledLocked = C.bool(cfg.Sources["enabled"] == "env")
-	*shareLocked = C.bool(cfg.Sources["share"] == "env")
+	*shareLocked = C.bool(cfg.Sources["share"] == "env" || cfg.Sources["share_devices"] == "env")
 	*placementLocked = C.bool(cfg.Sources["placement"] == "env")
 	return C.bool(ok)
 }
@@ -33,10 +35,17 @@ func SetClusterModeEnabled(enabled C.bool) {
 	updateClusterConfig(api.ClusterConfigRequest{Enabled: &b}, func(c *api.ClusterConfig) { c.Enabled = b })
 }
 
-//export SetClusterShareEnabled
-func SetClusterShareEnabled(share C.bool) {
-	b := bool(share)
-	updateClusterConfig(api.ClusterConfigRequest{Share: &b}, func(c *api.ClusterConfig) { c.Share = b })
+// ToggleClusterShare flips the share switch for the GPU called name ("" for
+// the CPU-only switch), saving share and share_devices together.
+//
+//export ToggleClusterShare
+func ToggleClusterShare(name *C.char) {
+	clusterMenu.Lock()
+	share, devices := server.ClusterShareToggle(clusterMenu.cfg, C.GoString(name))
+	clusterMenu.Unlock()
+	updateClusterConfig(api.ClusterConfigRequest{Share: &share, ShareDevices: &devices}, func(c *api.ClusterConfig) {
+		c.Share, c.ShareDevices = share, devices
+	})
 }
 
 //export SetClusterPlacementGreedy
@@ -48,9 +57,21 @@ func SetClusterPlacementGreedy(greedy C.bool) {
 	updateClusterConfig(api.ClusterConfigRequest{Placement: &p}, func(c *api.ClusterConfig) { c.Placement = p })
 }
 
-// ClusterGPUName returns server.ClusterGPU as a C string the caller frees.
+// ClusterShareItems returns the share switches as lines of "name\ttitle\ton"
+// (see server.ClusterShareItems), as a C string the caller frees.
 //
-//export ClusterGPUName
-func ClusterGPUName() *C.char {
-	return C.CString(server.ClusterGPU())
+//export ClusterShareItems
+func ClusterShareItems() *C.char {
+	clusterMenu.Lock() // just refreshed by ClusterMenuState
+	cfg := clusterMenu.cfg
+	clusterMenu.Unlock()
+	var sb strings.Builder
+	for _, it := range server.ClusterShareItems(cfg) {
+		on := "0"
+		if it.On {
+			on = "1"
+		}
+		sb.WriteString(it.Name + "\t" + it.Title + "\t" + on + "\n")
+	}
+	return C.CString(sb.String())
 }

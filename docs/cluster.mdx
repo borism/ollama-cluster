@@ -109,10 +109,13 @@ The switches map onto:
   `host:port` list; rejected with an inline error if it doesn't parse as
   that.
 
-On macOS, the menu-bar menu has **Cluster Mode** and **Share the \<GPU
-name\> GPU** items, each with a green (on) or red (off) dot; click one
-to switch it. A **Placement** submenu below them picks the placement
-policy. macOS asks once
+On macOS, the menu-bar menu has a **Cluster Mode** item and one share item
+per GPU, like the Settings page: **Share \<GPU name\>** for each GPU (with
+the device name added if two GPUs have the same name), **Share the \<GPU
+name\> GPU** on a machine with one, or **Share this computer's CPU** on a
+machine without. Each has a green (on) or red (off) dot; click one to
+switch it. A **Placement** submenu below them picks the placement policy.
+macOS asks once
 whether Ollama may find devices on local networks; discovery needs that
 allowed (System Settings > Privacy & Security > Local Network).
 
