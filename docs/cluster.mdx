@@ -51,7 +51,9 @@ server's `~/.ollama/server.json`, so it survives restarts. For the Linux
 service that file is `/usr/share/ollama/.ollama/server.json`: the server
 writes it itself, so it lands in the right place whichever user runs the
 service. `ollama cluster off` turns it off again, and `ollama cluster
-status` shows every cluster setting and where it comes from. The other
+status` shows every cluster setting and where it comes from, followed by
+this machine's GPUs, one per line, with the device name `share-devices`
+takes and whether peers can use it. The other
 settings in the table below are changed the same way:
 
 ```shell
