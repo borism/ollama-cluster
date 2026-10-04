@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"sync"
 	"testing"
@@ -13,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/borism/ollama-cluster/api"
+	"github.com/borism/ollama-cluster/cluster"
 	"github.com/borism/ollama-cluster/format"
 	"github.com/borism/ollama-cluster/fs/gguf"
 	gguftest "github.com/borism/ollama-cluster/internal/testutil/gguf"
@@ -2265,4 +2268,79 @@ func TestSchedulerTracksMultipleLoadedRunners(t *testing.T) {
 
 	expectedFree := uint64(24*format.GigaByte) - uint64(8*format.GigaByte) - uint64(4*format.GigaByte)
 	require.Equal(t, expectedFree, gpus[0].FreeMemory)
+}
+
+func TestFailedRPCPeer(t *testing.T) {
+	list := "10.0.0.2:50052,192.0.2.7:50052"
+	msg := "llama-server process has terminated: exit status 1: Failed to connect to 192.0.2.7:50052"
+	if addr, ok := failedRPCPeer(msg, list); !ok || addr != "192.0.2.7:50052" {
+		t.Fatalf("got %q %v", addr, ok)
+	}
+	if _, ok := failedRPCPeer("cudaMalloc failed: out of memory", list); ok {
+		t.Fatal("unrelated message matched")
+	}
+	if _, ok := failedRPCPeer("Failed to connect to 10.9.9.9:50052", list); ok {
+		t.Fatal("address outside the rpc list matched")
+	}
+}
+
+// A peer that dies after the dial check makes llama-server exit with "Failed
+// to connect"; load retries once without it, and not a second time.
+func TestSchedLoadRetriesWithoutFailedRPCPeer(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+	peerAddr := fmt.Sprintf("127.0.0.1:%d", port)
+
+	for _, secondFails := range []bool{false, true} {
+		ctx, done := context.WithTimeout(t.Context(), time.Second)
+		s := InitScheduler(ctx)
+		s.clusterTable.Store(cluster.NewStaticTable(cluster.Peer{
+			ID: "p1", Addr: "127.0.0.1", RPCPort: port,
+			ProtoMajor: cluster.RPCProtoMajor, ProtoMinor: cluster.RPCProtoMinor,
+			Devices: []ml.DeviceInfo{{TotalMemory: 64 * format.GigaByte, FreeMemory: 64 * format.GigaByte}},
+		}))
+		var launched []string
+		connectErr := errors.New("llama-server process has terminated: exit status 1: Failed to connect to " + peerAddr)
+		s.newServerFn = func(_ ml.SystemInfo, _ []ml.DeviceInfo, model string, _ *gguf.Model, _ []string, _ []string, opts api.Options, _ int, _ llm.LlamaServerConfig) (llm.LlamaServer, error) {
+			launched = append(launched, opts.RPCServers)
+			m := &mockLlm{modelPath: model}
+			if len(launched) == 1 || secondFails {
+				m.loadErr = connectErr
+			}
+			return m, nil
+		}
+		scenario := newScenarioRequest(t, ctx, "m", 1*format.GigaByte, nil, nil)
+		gpus := []ml.DeviceInfo{{DeviceID: ml.DeviceID{Library: "Metal"}}}
+		s.load(scenario.req, getSystemInfoFn(), gpus, false)
+
+		require.Equal(t, []string{peerAddr, ""}, launched)
+		if secondFails {
+			select {
+			case err := <-scenario.req.errCh:
+				require.ErrorIs(t, err, connectErr)
+			case <-time.After(100 * time.Millisecond):
+				t.Fatal("expected error after second failure")
+			}
+		} else {
+			select {
+			case <-scenario.req.successCh:
+			case err := <-scenario.req.errCh:
+				t.Fatalf("unexpected error %v", err)
+			case <-time.After(time.Second):
+				t.Fatal("expected successful load")
+			}
+		}
+		done()
+	}
 }

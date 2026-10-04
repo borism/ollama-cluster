@@ -540,3 +540,14 @@ func listenLoop(ctx context.Context, conn *net.UDPConn, cfg Config, t *Table) {
 		})
 	}
 }
+
+// NewStaticTable returns a Table holding exactly peers, without starting
+// discovery. For tests of code that consumes a Table.
+func NewStaticTable(peers ...Peer) *Table {
+	t := &Table{peers: map[string]Peer{}, ttl: time.Hour, stopped: make(chan struct{})}
+	for _, p := range peers {
+		p.LastSeen = time.Now()
+		t.peers[p.ID] = p
+	}
+	return t
+}

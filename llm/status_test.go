@@ -17,6 +17,11 @@ func TestStatusWriterCapturesErrorLine(t *testing.T) {
 			want: "llama_init_from_model: failed to initialize the context: failed to initialize Metal backend",
 		},
 		{
+			name: "rpc connect failure",
+			log:  "ggml_backend_rpc_init: Failed to connect to 10.0.0.2:50052\n",
+			want: "Failed to connect to 10.0.0.2:50052",
+		},
+		{
 			name: "cobra error",
 			log:  "Error: foo baz bar\n",
 			want: "Error: foo baz bar",

@@ -80,6 +80,7 @@ var errorPrefixes = []string{
 	"Deepseek2 does not support K-shift",
 	"signal arrived during cgo execution",
 	"llama_init_from_model:",
+	"Failed to connect to",
 }
 
 var outOfMemorySubstrings = []string{
