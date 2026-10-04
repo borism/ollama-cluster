@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"testing"
@@ -83,11 +84,14 @@ func TestRPCWorkerLogsUnexpectedExit(t *testing.T) {
 	}
 	defer w.Stop()
 
-	if err := w.cmd.Process.Kill(); err != nil {
+	w.mu.Lock()
+	cmd, done := w.cmd, w.done
+	w.mu.Unlock()
+	if err := cmd.Process.Kill(); err != nil {
 		t.Fatalf("kill worker process: %v", err)
 	}
 	select {
-	case <-w.done:
+	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("worker did not report exit after being killed")
 	}
@@ -181,5 +185,105 @@ func TestRPCDeviceArgs(t *testing.T) {
 	}
 	if got := rpcDeviceArgs(nil); len(got) != 0 {
 		t.Errorf("no devices should add no -d, got %q", got)
+	}
+}
+
+func TestRPCRestartBackoff(t *testing.T) {
+	var d time.Duration
+	var got []time.Duration
+	for range 8 {
+		d = rpcRestartBackoff(d, time.Second)
+		got = append(got, d)
+	}
+	want := []time.Duration{1, 2, 4, 8, 16, 32, 60, 60}
+	for i := range want {
+		if got[i] != want[i]*time.Second {
+			t.Fatalf("backoff sequence = %v, want 1s,2s,4s,8s,16s,32s,1m,1m", got)
+		}
+	}
+	if d := rpcRestartBackoff(time.Minute, 2*time.Minute); d != time.Second {
+		t.Fatalf("backoff after a long healthy run = %v, want 1s", d)
+	}
+}
+
+// TestRPCFakeServerHelper is not a test: it is the fake ggml-rpc-server the
+// restart test re-executes this test binary as. It listens on
+// $RPC_FAKE_PORT until killed.
+func TestRPCFakeServerHelper(t *testing.T) {
+	port := os.Getenv("RPC_FAKE_PORT")
+	if port == "" {
+		t.Skip("helper process only")
+	}
+	l, err := net.Listen("tcp", "127.0.0.1:"+port)
+	if err != nil {
+		os.Exit(1)
+	}
+	for {
+		c, err := l.Accept()
+		if err != nil {
+			os.Exit(1)
+		}
+		c.Close()
+	}
+}
+
+// TestRPCWorkerRestartsOnCrash kills the worker process behind Stop's back
+// and expects it back on the same port; after Stop it must stay down.
+func TestRPCWorkerRestartsOnCrash(t *testing.T) {
+	port, err := pickFreeTCPPort()
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := &RPCWorker{
+		exe:    os.Args[0],
+		args:   []string{"-test.run=^TestRPCFakeServerHelper$"},
+		env:    append(os.Environ(), "RPC_FAKE_PORT="+strconv.Itoa(port)),
+		host:   "127.0.0.1",
+		port:   port,
+		stopCh: make(chan struct{}),
+	}
+	if err := w.spawn(); err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	defer w.Stop()
+	if err := w.waitUntilListening(5 * time.Second); err != nil {
+		t.Fatal(err)
+	}
+
+	w.mu.Lock()
+	first := w.cmd
+	w.mu.Unlock()
+	first.Process.Kill()
+
+	deadline := time.Now().Add(10 * time.Second)
+	var second *exec.Cmd
+	for second == nil {
+		w.mu.Lock()
+		if w.cmd != first {
+			second = w.cmd
+		}
+		w.mu.Unlock()
+		if time.Now().After(deadline) {
+			t.Fatal("worker was not respawned")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	for w.Port() != port {
+		if time.Now().After(deadline) {
+			t.Fatalf("Port() = %d, want %d back after a crash", w.Port(), port)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	w.Stop()
+	time.Sleep(2 * time.Second) // longer than the min backoff
+	if w.Port() != 0 {
+		t.Fatalf("Port() = %d after Stop, want 0 (no restart)", w.Port())
+	}
+	w.mu.Lock()
+	third := w.cmd
+	w.mu.Unlock()
+	if third != second {
+		t.Fatal("worker was respawned after Stop")
 	}
 }

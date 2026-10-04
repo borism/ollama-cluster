@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"reflect"
+	"regexp"
 	"runtime"
 	"slices"
 	"sort"
@@ -41,6 +42,10 @@ type LlmRequest struct {
 	// oomRetryAttempted is set after a llama-server load crash triggers an
 	// evict-all-and-retry. Prevents infinite retry on persistent load failures.
 	oomRetryAttempted bool
+
+	// excludeRPC holds peers (host:port) that failed to connect during load;
+	// non-empty means the single peer retry has been used.
+	excludeRPC map[string]bool
 
 	// numCtxAuto is true when NumCtx came from Ollama's automatic VRAM-tier
 	// default rather than explicit request, model, or environment config.
@@ -562,7 +567,10 @@ func (s *Scheduler) load(req *LlmRequest, systemInfo ml.SystemInfo, gpus []ml.De
 			predicted := llm.PredictServerVRAM(req.model.ModelPath, f, predictedCtx)
 			reqOpts := req.opts
 			if table := s.clusterTable.Load(); table != nil && (reqOpts.RPCAuto == nil || *reqOpts.RPCAuto) {
-				reqOpts = cluster.SelectReachableRPCServers(gpus, predicted, table.Peers(), reqOpts, cluster.DialRPC)
+				peers := slices.DeleteFunc(slices.Clone(table.Peers()), func(p cluster.Peer) bool {
+					return req.excludeRPC[fmt.Sprintf("%s:%d", p.Addr, p.RPCPort)]
+				})
+				reqOpts = cluster.SelectReachableRPCServers(gpus, predicted, peers, reqOpts, cluster.DialRPC)
 			}
 			loadGpus, launchOpts = selectLlamaServerPlacement(systemInfo, gpus, predicted, reqOpts)
 			availableForBatch, _, _ := availableMemoryForPlacement(systemInfo, loadGpus, launchOpts)
@@ -671,6 +679,14 @@ func (s *Scheduler) load(req *LlmRequest, systemInfo ml.SystemInfo, gpus []ml.De
 		slog.Info("Load failed", "model", req.model.ModelPath, "error", err)
 		s.activeLoading.Close()
 		s.activeLoading = nil
+
+		// A peer can die between the dial check and llama-server connecting.
+		// Retry once without it; only for peers we picked ourselves.
+		if addr, ok := failedRPCPeer(err.Error(), launchOpts.RPCServers); ok && req.opts.RPCServers == "" && len(req.excludeRPC) == 0 {
+			slog.Warn("cluster: peer failed during load, retrying without it", "addr", addr)
+			req.excludeRPC = map[string]bool{addr: true}
+			return s.load(req, systemInfo, gpus, requireFull)
+		}
 
 		s.loadedMu.Lock()
 		loadedCount := len(s.loaded)
@@ -782,6 +798,19 @@ iGPUScan:
 	}()
 
 	return false
+}
+
+var failedRPCConnect = regexp.MustCompile(`Failed to connect to (\S+)`)
+
+// failedRPCPeer returns the host:port from ggml-rpc.cpp's "Failed to connect
+// to host:port" if it is one of the comma-separated rpcServers.
+func failedRPCPeer(errMsg, rpcServers string) (string, bool) {
+	for _, m := range failedRPCConnect.FindAllStringSubmatch(errMsg, -1) {
+		if slices.Contains(strings.Split(rpcServers, ","), m[1]) {
+			return m[1], true
+		}
+	}
+	return "", false
 }
 
 func (req *LlmRequest) reduceAutoNumCtxForLoadOOM(f *gguf.Model, numParallel int, completion bool, systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, launchOpts api.Options) (oldNumCtx, effectiveNumCtx, newNumCtx, oldNumBatch, newNumBatch int, ok bool) {
