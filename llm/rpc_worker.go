@@ -21,12 +21,21 @@ import (
 // llama.cpp RPC-backed inference (see tools/rpc/README.md /
 // tools/rpc/rpc-server.cpp upstream).
 type RPCWorker struct {
-	mu     sync.Mutex
-	cmd    *exec.Cmd
-	host   string
-	port   int
-	done   chan struct{}
-	status *StatusWriter
+	exe  string
+	args []string
+	env  []string
+	host string
+	port int
+	// stopCh is closed by Stop so a restart backoff sleep can end early.
+	stopCh chan struct{}
+
+	mu        sync.Mutex // guards the fields below
+	cmd       *exec.Cmd
+	done      chan struct{} // closed when cmd exits; replaced on restart
+	status    *StatusWriter
+	stopped   bool // set by Stop: an exit after this is deliberate
+	startedAt time.Time
+	backoff   time.Duration
 }
 
 // FindRPCWorker locates the ggml-rpc-server binary in lib/ollama/, mirroring
@@ -87,57 +96,25 @@ func StartRPCWorker(port int, cacheDir string) (*RPCWorker, error) {
 		cacheDir = ""
 	}
 
-	cmd := exec.Command(exe, args...)
-	cmd.Env = os.Environ()
+	env := os.Environ()
 	if cacheDir != "" {
 		// rpc-server.cpp has no flag for the cache path itself -- it always
 		// derives one from $LLAMA_CACHE (fs_get_cache_directory in
 		// tools/rpc/rpc-server.cpp), appending "rpc/" to it.
-		cmd.Env = append(cmd.Env, "LLAMA_CACHE="+cacheDir)
-	}
-
-	status := NewStatusWriter(nil)
-	cmd.Stdout = status
-	cmd.Stderr = status
-
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("start ggml-rpc-server: %w", err)
+		env = append(env, "LLAMA_CACHE="+cacheDir)
 	}
 
 	w := &RPCWorker{
-		cmd:    cmd,
+		exe:    exe,
+		args:   args,
+		env:    env,
 		host:   host,
 		port:   port,
-		done:   make(chan struct{}),
-		status: status,
+		stopCh: make(chan struct{}),
 	}
-
-	go func(cmd *exec.Cmd, done chan struct{}, status *StatusWriter) {
-		err := cmd.Wait()
-		close(done)
-		// Port() (and so the beacon's Sharing flag) already reflects this
-		// via w.running() -- but that's silent about *why* the worker went
-		// away, which left two real crashes this fleet hit with zero trace
-		// (see llm/rpc_worker_test.go). Stop() also lands here (it kills
-		// the process, then waits on the same done channel this Wait()
-		// closes), so a deliberate stop logs too -- an "exit status 1" from
-		// a normal kill isn't worth telling apart from a real crash, at
-		// slog.Info it's noise either way, not an alarm.
-		//
-		// TODO(upstream llama.cpp): both crashes this caught turned out to
-		// be a clean exit (err == nil, no captured stderr) -- traced to
-		// ggml_backend_rpc_start_server's serve loop
-		// (ggml/src/ggml-rpc/ggml-rpc.cpp): a single failed accept() on the
-		// listening socket logs "Failed to accept client connection" and
-		// returns, ending the whole process, no retry. This logging call
-		// only makes that visible; it doesn't make the worker resilient to
-		// it. Two fixes, not mutually exclusive:
-		// (a) loop past a transient accept() failure instead of returning,
-		// or (b) have this Go side treat an unexpected (non-Stop) exit as
-		// a signal to restart the worker rather than leave it down until
-		// the next manual restart.
-		slog.Info("cluster: rpc worker exited", "error", err, "last_output", status.LastError())
-	}(cmd, w.done, status)
+	if err := w.spawn(); err != nil {
+		return nil, err
+	}
 
 	// Generous on purpose: on Apple Silicon the first start after install
 	// compiles the Metal kernel libraries before listening (~22s on an M2
@@ -153,14 +130,121 @@ func StartRPCWorker(port int, cacheDir string) (*RPCWorker, error) {
 	return w, nil
 }
 
-// tidyCache runs tidyRPCCache every rpcCacheTidyInterval until the worker
-// exits. It can't turn a running worker's cache off, only free space for it.
+var errRPCWorkerStopped = errors.New("rpc worker stopped")
+
+const (
+	rpcRestartMinBackoff = time.Second
+	rpcRestartMaxBackoff = time.Minute
+	// A worker that stayed up this long before dying is treated as healthy
+	// again: the next restart goes back to the minimum backoff.
+	rpcRestartHealthyRun = time.Minute
+)
+
+// rpcRestartBackoff returns how long to wait before the next restart, given
+// the previous wait (0 for none) and how long the worker ran before dying.
+func rpcRestartBackoff(prev, ranFor time.Duration) time.Duration {
+	if prev <= 0 || ranFor >= rpcRestartHealthyRun {
+		return rpcRestartMinBackoff
+	}
+	return min(prev*2, rpcRestartMaxBackoff)
+}
+
+// spawn starts one ggml-rpc-server process with the worker's fixed args and
+// env (so a restart keeps the same port) and watches it for exit.
+func (w *RPCWorker) spawn() error {
+	cmd := exec.Command(w.exe, w.args...)
+	cmd.Env = w.env
+	status := NewStatusWriter(nil)
+	cmd.Stdout = status
+	cmd.Stderr = status
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.stopped {
+		return errRPCWorkerStopped
+	}
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start ggml-rpc-server: %w", err)
+	}
+	done := make(chan struct{})
+	w.cmd, w.done, w.status, w.startedAt = cmd, done, status, time.Now()
+
+	go func(startedAt time.Time) {
+		err := cmd.Wait()
+		close(done)
+		w.mu.Lock()
+		stopped := w.stopped
+		w.mu.Unlock()
+		if stopped {
+			slog.Info("cluster: rpc worker exited", "error", err, "last_output", status.LastError())
+			return
+		}
+		// Port() (and so the beacon's Sharing flag) already reflects the
+		// exit via w.running(), which is silent about *why* the worker went
+		// away -- two real crashes this fleet hit left zero trace.
+		//
+		// TODO(upstream llama.cpp): both crashes this caught turned out to
+		// be a clean exit (err == nil, no captured stderr) -- traced to
+		// ggml_backend_rpc_start_server's serve loop
+		// (ggml/src/ggml-rpc/ggml-rpc.cpp): a single failed accept() on the
+		// listening socket logs "Failed to accept client connection" and
+		// returns, ending the whole process, no retry. Restarting here
+		// covers it; fixing the loop itself (loop past a transient
+		// accept() failure instead of returning) is tracked upstream in
+		// issue #25.
+		slog.Warn("cluster: rpc worker exited unexpectedly, restarting", "error", err, "last_output", status.LastError())
+		w.restart(time.Since(startedAt))
+	}(w.startedAt)
+	return nil
+}
+
+// restart waits out the backoff, then respawns the worker on the same port
+// and waits for it to listen. If the new process dies or never listens, its
+// own exit watcher calls restart again, so only a failed Start loops here.
+func (w *RPCWorker) restart(ranFor time.Duration) {
+	for {
+		w.mu.Lock()
+		w.backoff = rpcRestartBackoff(w.backoff, ranFor)
+		backoff := w.backoff
+		w.mu.Unlock()
+
+		select {
+		case <-w.stopCh:
+			return
+		case <-time.After(backoff):
+		}
+		err := w.spawn()
+		if errors.Is(err, errRPCWorkerStopped) {
+			return
+		}
+		if err != nil {
+			slog.Warn("cluster: rpc worker restart failed", "error", err)
+			ranFor = 0
+			continue
+		}
+		// Same 2 min as the initial start (Metal compile on first run).
+		if err := w.waitUntilListening(2 * time.Minute); err != nil {
+			slog.Warn("cluster: restarted rpc worker is not listening", "error", err)
+			w.mu.Lock()
+			cmd := w.cmd
+			w.mu.Unlock()
+			// Its exit watcher takes it from here.
+			_ = cmd.Process.Kill()
+			return
+		}
+		slog.Info("cluster: rpc worker restarted", "addr", w.Addr())
+		return
+	}
+}
+
+// tidyCache runs tidyRPCCache every rpcCacheTidyInterval until Stop, across
+// restarts. It can't turn a running worker's cache off, only free space for it.
 func (w *RPCWorker) tidyCache(dir string, maxBytes uint64) {
 	t := time.NewTicker(rpcCacheTidyInterval)
 	defer t.Stop()
 	for {
 		select {
-		case <-w.done:
+		case <-w.stopCh:
 			return
 		case <-t.C:
 			if !tidyRPCCache(dir, maxBytes, time.Now(), diskFree) {
@@ -173,13 +257,16 @@ func (w *RPCWorker) tidyCache(dir string, maxBytes uint64) {
 // waitUntilListening polls the worker's port until a TCP connection
 // succeeds, the process exits, or timeout elapses.
 func (w *RPCWorker) waitUntilListening(timeout time.Duration) error {
+	w.mu.Lock()
+	done, status := w.done, w.status
+	w.mu.Unlock()
 	deadline := time.Now().Add(timeout)
 	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(w.port))
 
 	for {
 		select {
-		case <-w.done:
-			if msg := w.status.LastError(); msg != "" {
+		case <-done:
+			if msg := status.LastError(); msg != "" {
 				return fmt.Errorf("ggml-rpc-server exited before it started listening: %s", msg)
 			}
 			return errors.New("ggml-rpc-server exited before it started listening")
@@ -233,6 +320,10 @@ func (w *RPCWorker) running() bool {
 // Stop kills the worker process and waits for it to exit.
 func (w *RPCWorker) Stop() error {
 	w.mu.Lock()
+	if !w.stopped {
+		w.stopped = true
+		close(w.stopCh)
+	}
 	cmd := w.cmd
 	done := w.done
 	w.mu.Unlock()
