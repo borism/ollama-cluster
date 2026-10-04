@@ -1354,6 +1354,7 @@ var clusterSettingKeys = []struct{ json, name, env string }{
 	{"enabled", "cluster", "OLLAMA_CLUSTER"},
 	{"share", "share", "OLLAMA_CLUSTER_SHARE"},
 	{"seeds", "seeds", "OLLAMA_CLUSTER_SEEDS"},
+	{"share_devices", "share-devices", "OLLAMA_CLUSTER_SHARE_DEVICES"},
 	{"placement", "placement", "OLLAMA_CLUSTER_PLACEMENT"},
 	{"cache_gb", "cache-gb", "OLLAMA_CLUSTER_CACHE_GB"},
 }
@@ -1367,11 +1368,12 @@ func onOff(b bool) string {
 
 func printClusterConfig(cfg *api.ClusterConfig) {
 	values := map[string]string{
-		"enabled":   onOff(cfg.Enabled),
-		"share":     onOff(cfg.Share),
-		"seeds":     cmp.Or(cfg.Seeds, "-"),
-		"placement": cfg.Placement,
-		"cache_gb":  fmt.Sprintf("%d (%s used)", cfg.CacheGB, format.HumanBytes2(cfg.CacheUsedBytes)),
+		"enabled":       onOff(cfg.Enabled),
+		"share":         onOff(cfg.Share),
+		"seeds":         cmp.Or(cfg.Seeds, "-"),
+		"share_devices": cmp.Or(cfg.ShareDevices, "all"),
+		"placement":     cfg.Placement,
+		"cache_gb":      fmt.Sprintf("%d (%s used)", cfg.CacheGB, format.HumanBytes2(cfg.CacheUsedBytes)),
 	}
 	var data [][]string
 	for _, k := range clusterSettingKeys {
@@ -1457,6 +1459,8 @@ func ClusterSetHandler(cmd *cobra.Command, args []string) error {
 		req.Share = &b
 	case "seeds":
 		req.Seeds = &value
+	case "share-devices":
+		req.ShareDevices = &value
 	case "placement":
 		req.Placement = &value
 	case "cache-gb":
@@ -1467,7 +1471,7 @@ func ClusterSetHandler(cmd *cobra.Command, args []string) error {
 		gb := uint(n)
 		req.CacheGB = &gb
 	default:
-		return fmt.Errorf("unknown cluster setting %q: expected share, seeds, placement or cache-gb", key)
+		return fmt.Errorf("unknown cluster setting %q: expected share, share-devices, seeds, placement or cache-gb", key)
 	}
 	for _, k := range clusterSettingKeys {
 		if k.name == key {
@@ -2818,6 +2822,7 @@ func NewCLI() *cobra.Command {
 		Long: `Change a cluster setting, without restarting the server. Settings:
 
   share on|off           share this machine's GPU with peers (default on)
+  share-devices DEV,...  share only these devices, e.g. CUDA1 ("" = all)
   seeds HOST:PORT,...    peers to reach directly on other subnets ("" clears)
   placement waterfill|greedy
                          how peers are picked when a model doesn't fit

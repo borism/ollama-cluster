@@ -245,7 +245,7 @@ export default function ClusterSettings() {
               <Label>
                 {settings.gpu
                   ? `Share the ${settings.gpu}`
-                  : "Share this computer's GPU"}
+                  : "Share this computer"}
               </Label>
               <Description>
                 Let other computers in the cluster use this computer's spare GPU

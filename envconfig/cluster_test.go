@@ -11,7 +11,7 @@ import (
 // server.json, which beats the default.
 func TestClusterSettingsPrecedence(t *testing.T) {
 	setTestHome(t, t.TempDir())
-	for _, k := range []string{"OLLAMA_CLUSTER", "OLLAMA_CLUSTER_SHARE", "OLLAMA_CLUSTER_SEEDS", "OLLAMA_CLUSTER_PLACEMENT", "OLLAMA_CLUSTER_CACHE_GB"} {
+	for _, k := range []string{"OLLAMA_CLUSTER", "OLLAMA_CLUSTER_SHARE", "OLLAMA_CLUSTER_SEEDS", "OLLAMA_CLUSTER_SHARE_DEVICES", "OLLAMA_CLUSTER_PLACEMENT", "OLLAMA_CLUSTER_CACHE_GB"} {
 		t.Setenv(k, "")
 	}
 
@@ -20,11 +20,12 @@ func TestClusterSettingsPrecedence(t *testing.T) {
 	}
 
 	if err := UpdateServerConfig(map[string]any{
-		"cluster":           true,
-		"cluster_share":     false,
-		"cluster_seeds":     "192.0.2.10:11435",
-		"cluster_placement": "greedy",
-		"cluster_cache_gb":  8,
+		"cluster":               true,
+		"cluster_share":         false,
+		"cluster_seeds":         "192.0.2.10:11435",
+		"cluster_share_devices": " CUDA1, Vulkan0 ,",
+		"cluster_placement":     "greedy",
+		"cluster_cache_gb":      8,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -32,6 +33,14 @@ func TestClusterSettingsPrecedence(t *testing.T) {
 		len(ClusterSeeds()) != 1 || ClusterSources()["share"] != "config" {
 		t.Errorf("from server.json: cluster=%v share=%v placement=%q cache=%d seeds=%v sources=%v",
 			Cluster(), ClusterShare(true), ClusterPlacement(), ClusterCacheGB(), ClusterSeeds(), ClusterSources())
+	}
+
+	if d := ClusterShareDevices(); len(d) != 2 || d[0] != "CUDA1" || d[1] != "Vulkan0" || ClusterSources()["share_devices"] != "config" {
+		t.Errorf("share devices from server.json: %q sources=%v", d, ClusterSources())
+	}
+	t.Setenv("OLLAMA_CLUSTER_SHARE_DEVICES", "CUDA0")
+	if d := ClusterShareDevices(); len(d) != 1 || d[0] != "CUDA0" || ClusterSources()["share_devices"] != "env" {
+		t.Errorf("share devices env should win: %q", d)
 	}
 
 	t.Setenv("OLLAMA_CLUSTER", "0")

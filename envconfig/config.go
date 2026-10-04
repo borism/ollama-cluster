@@ -388,11 +388,12 @@ type serverConfigData struct {
 	DisableOllamaCloud bool `json:"disable_ollama_cloud,omitempty"`
 
 	// Cluster settings, see cluster.go. Pointers: absent means "not set here".
-	Cluster          *bool   `json:"cluster,omitempty"`
-	ClusterShare     *bool   `json:"cluster_share,omitempty"`
-	ClusterSeeds     *string `json:"cluster_seeds,omitempty"`
-	ClusterPlacement *string `json:"cluster_placement,omitempty"`
-	ClusterCacheGB   *uint   `json:"cluster_cache_gb,omitempty"`
+	Cluster             *bool   `json:"cluster,omitempty"`
+	ClusterShare        *bool   `json:"cluster_share,omitempty"`
+	ClusterSeeds        *string `json:"cluster_seeds,omitempty"`
+	ClusterShareDevices *string `json:"cluster_share_devices,omitempty"`
+	ClusterPlacement    *string `json:"cluster_placement,omitempty"`
+	ClusterCacheGB      *uint   `json:"cluster_cache_gb,omitempty"`
 }
 
 var (
