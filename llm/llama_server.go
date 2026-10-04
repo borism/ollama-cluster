@@ -81,12 +81,8 @@ const (
 	openEndedGenerationContextMultiplier = 10
 )
 
-const (
-	bytesPerMiB = 1 << 20
-
-	// mmprojOffloadHeadroom leaves 1 GiB for backend buffers beyond projector weights.
-	mmprojOffloadHeadroom = 1 << 30
-)
+// mmprojOffloadHeadroom leaves 1 GiB for backend buffers beyond projector weights.
+const mmprojOffloadHeadroom = 1 << 30
 
 // DefaultEmbeddingNumBatchForContext caps the embedding batch default to the
 // active context length before it is passed to llama-server.
