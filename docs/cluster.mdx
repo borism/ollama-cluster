@@ -56,6 +56,7 @@ settings in the table below are changed the same way:
 
 ```shell
 ollama cluster set share off                # use peers' GPUs without sharing this one
+ollama cluster set share-devices CUDA1      # share only this GPU ("" = all)
 ollama cluster set seeds 192.0.2.10:11435   # "" clears
 ollama cluster set placement greedy
 ollama cluster set cache-gb 64
@@ -89,11 +90,17 @@ right below "Expose Ollama to the network". It changes the same settings as
 without a restart, so the app, the menu and the command line always agree.
 The switches map onto:
 
+![Cluster settings on a machine with two GPUs, sharing only the first](./images/cluster-share-gpus.png)
+
 - **Cluster mode** -- `OLLAMA_CLUSTER`.
-- **Share the \<GPU name\> GPU**, e.g. "Share the Apple M2 Max GPU" --
-  `OLLAMA_CLUSTER_SHARE` (disabled while cluster mode is off). It reads
-  "Share this computer's GPU" on a machine without one, or before the
-  server has started.
+- **Share this computer's GPUs** -- one switch per GPU, labelled with
+  its name, ggml device name and memory (disabled while cluster mode is
+  off). All on shares every GPU (`OLLAMA_CLUSTER_SHARE` on,
+  `OLLAMA_CLUSTER_SHARE_DEVICES` empty); some on shares only those
+  (`OLLAMA_CLUSTER_SHARE_DEVICES` set to their names); all off turns
+  `OLLAMA_CLUSTER_SHARE` off. On a machine without a GPU it is a single
+  **Share this computer's CPU** switch. The switches are locked when
+  either variable is set in the environment.
 - **Placement** -- `OLLAMA_CLUSTER_PLACEMENT`, Waterfill (the default) or
   Greedy (disabled while cluster mode is off).
 - **Tensor cache** -- `OLLAMA_CLUSTER_CACHE_GB`, the cache's size cap in GB;
