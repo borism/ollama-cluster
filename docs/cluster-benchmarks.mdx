@@ -131,7 +131,7 @@ algorithm room to choose differently — both converge on the same two-peer,
   (`granite4.2:30b` at 128K, footnote ³). Neither strategy is a safe default
   across this whole model set.
 
-## Known exception: hybrid SSM architectures don't offload
+## Known exception: `qwen3.8:27b`
 
 `qwen3.8:27b` was tested the same way (CPU-only / waterfill / greedy × 4K /
 32K / 128K) and is deliberately left out of the table above — its numbers
@@ -143,15 +143,25 @@ would misleadingly read as "cluster barely helps":
 | 32K | 2.89 | 2.87 | 2.88 |
 | 128K | OOM⁵ | 1.93 (265.8s load) | 1.54 |
 
-Root cause, confirmed in the server log: this model's GGUF reports
-`qwen35.ssm.*` metadata — it's a hybrid Mamba/SSM + attention architecture,
-not a plain transformer — and `load_tensors` shows **0/66 layers offloaded
-to GPU on every run**, cluster placement included. llama.cpp's CUDA/RPC
-backends don't offload this architecture's recurrent-state ops yet, so it
-silently falls back to full CPU regardless of `rpc_placement`, `--fit`, or
-the RPC peer's free VRAM. Cluster mode never got a chance to help here — the
-bottleneck is upstream llama.cpp op support for this architecture family,
-not this fork's placement code.
+These runs logged 0/66 layers offloaded on every configuration. An earlier
+version of this page blamed missing CUDA/RPC support for the model's hybrid
+SSM/attention architecture. That does not hold up: **single-box check** (one
+20 GB RTX A4500 Linux box, no cluster, 160 generated tokens, median of two
+runs) shows `qwen3.8:27b` offloading normally, and the real slowdown there
+was an Ollama-side launch setting:
+
+| Build | Layers on GPU | Default sampling | `temperature: 0` |
+|---|---|---|---|
+| Before (fit target padded for the vision projector) | 59/66 | 13.5 tok/s | 14.9 tok/s |
+| After (llama-server's own fit target) | 63/66 | 18.5 tok/s | 21.6 tok/s |
+
+llama-server's fit step already reserves the projector's memory, and Ollama
+added the projector size plus 1 GiB to `LLAMA_ARG_FIT_TARGET` on top of that,
+so fewer layers were placed on the GPU. Sampling settings matter much less
+(about 5-10%: speculative-draft acceptance is lower at non-zero temperature).
+Why the cluster runs above showed 0/66 is not established; they were not
+repeated after this fix, so treat the table as unexplained rather than as an
+architecture limit.
 
 ⁵ The 128K CPU-only run hit an out-of-memory error allocating an 888 MB
 vision-encoder buffer. The head had ~20 GB of RAM available at the time, so
@@ -171,14 +181,13 @@ The numbers above raise two things we don't yet have a root cause for:
   working theory is that greedy's placement heuristic doesn't account for
   per-request KV cache growth, but we haven't instrumented the placement
   code to confirm it.
-- **Why `qwen3.8:27b` never offloads.** We've confirmed the symptom
-  (`load_tensors` logs 0/66 layers offloaded on every run, cluster or not)
-  and a plausible cause (missing CUDA/RPC op support for this architecture's
-  recurrent-state ops), but haven't traced it to a specific missing op in
-  `ggml-rpc.cpp` or filed it upstream.
+- **Why the `qwen3.8:27b` cluster runs offloaded 0/66 layers.** A single
+  CUDA box offloads 59/66 layers on the old build and 63/66 on the fixed
+  one (see above), so the cluster result needs a rerun on the fixed build
+  before anyone blames the architecture.
 
 Further testing (varying KV cache size independently of context, and
-bisecting `qwen3.8`'s op graph) is needed before either can be called
+rerunning the `qwen3.8` cluster rows on the fixed build) is needed before either can be called
 understood rather than just observed.
 
 See [`cluster.mdx`](/cluster) for how to enable cluster mode, environment
