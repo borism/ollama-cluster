@@ -1325,7 +1325,7 @@ func ClusterListHandler(cmd *cobra.Command, args []string) error {
 			p.ID,
 			p.Addr,
 			sharing,
-			strings.Join(devices, ", "),
+			strings.Join(devices, "\n"),
 			fmt.Sprintf("%.0f%%", p.Load*100),
 			latency,
 			bandwidth,
