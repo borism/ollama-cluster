@@ -22,10 +22,12 @@ import {
   type ClusterPlacement,
 } from "@/api";
 import { isWindowsPlatform } from "@/lib/platform";
+import { sharedDeviceNames, shareStateFor } from "@/lib/clusterDevices";
 
 const clusterEnvVars = {
   enabled: "OLLAMA_CLUSTER",
   share: "OLLAMA_CLUSTER_SHARE",
+  share_devices: "OLLAMA_CLUSTER_SHARE_DEVICES",
   placement: "OLLAMA_CLUSTER_PLACEMENT",
   seeds: "OLLAMA_CLUSTER_SEEDS",
   cache_gb: "OLLAMA_CLUSTER_CACHE_GB",
@@ -153,6 +155,13 @@ export default function ClusterSettings() {
     save(field, { ...settings, [field]: value });
   };
 
+  const handleDeviceToggle = (name: string, value: boolean) => {
+    if (!settings) return;
+    const on = sharedDeviceNames(settings, devices).filter((n) => n !== name);
+    if (value) on.push(name);
+    save("share", { ...settings, ...shareStateFor(on, devices) });
+  };
+
   const commitSeeds = () => {
     if (!settings) return;
     const trimmed = seedsInput.trim();
@@ -193,6 +202,10 @@ export default function ClusterSettings() {
     );
 
   if (!settings) return null;
+
+  const devices = settings.devices ?? [];
+  const shared = sharedDeviceNames(settings, devices);
+  const shareLocked = locked("share") || locked("share_devices");
 
   const peers = peersResponse?.peers ?? [];
   const spilledModels = (Array.isArray(spillover) ? spillover : []).filter(
@@ -243,27 +256,50 @@ export default function ClusterSettings() {
             <ShareIcon className="mt-1 h-5 w-5 flex-shrink-0 text-black dark:text-neutral-100" />
             <div>
               <Label>
-                {settings.gpu
-                  ? `Share the ${settings.gpu}`
-                  : "Share this computer's GPU"}
+                {devices.length > 0
+                  ? "Share this computer's GPUs"
+                  : "Share this computer's CPU"}
               </Label>
               <Description>
-                Let other computers in the cluster use this computer's spare GPU
-                capacity. Turn off to use their capacity without donating your
-                own.
+                Let other computers in the cluster use this computer's spare{" "}
+                {devices.length > 0 ? "GPU" : "CPU"} capacity. Turn off to use
+                their capacity without donating your own.
               </Description>
             </div>
           </div>
-          <div className="flex-shrink-0">
-            <Switch
-              checked={settings.share}
-              disabled={!enabled || locked("share")}
-              onChange={(checked) => handleToggle("share", checked)}
-            />
-          </div>
+          {devices.length === 0 && (
+            <div className="flex-shrink-0">
+              <Switch
+                checked={settings.share}
+                disabled={!enabled || shareLocked}
+                onChange={(checked) => handleToggle("share", checked)}
+              />
+            </div>
+          )}
         </div>
+        {devices.map((device) => (
+          <div
+            key={device.name}
+            className="ml-8 mt-3 flex items-start justify-between gap-4"
+          >
+            <div>
+              <Label>{device.description || device.name}</Label>
+              <Description>
+                {device.name} · {formatBytes(device.total_memory)}
+              </Description>
+            </div>
+            <div className="flex-shrink-0">
+              <Switch
+                checked={shared.includes(device.name)}
+                disabled={!enabled || shareLocked}
+                onChange={(checked) => handleDeviceToggle(device.name, checked)}
+              />
+            </div>
+          </div>
+        ))}
         <div className="ml-8">
           {lockedNote("share")}
+          {lockedNote("share_devices")}
           {errorFor("share")}
         </div>
       </Field>

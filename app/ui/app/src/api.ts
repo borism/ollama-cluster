@@ -288,9 +288,7 @@ export async function getClaudeDesktopAvailableModels(
     const seen = new Set<string>();
     return [...localModels, ...cloudModels]
       .filter((model: ModelResponse) => {
-        const base = model.name
-          .replace(/:latest$/, "")
-          .replace(/:cloud$/, "");
+        const base = model.name.replace(/:latest$/, "").replace(/:cloud$/, "");
         if (!base || seen.has(base)) return false;
 
         const families = model.details?.families;
@@ -629,6 +627,8 @@ export async function getCloudStatus(): Promise<CloudStatusResponse | null> {
 export interface ClusterSettingsData {
   enabled: boolean;
   share: boolean;
+  // Comma-separated ggml device names to share; "" shares every GPU.
+  share_devices: string;
   seeds: string;
   placement: ClusterPlacement;
   // Cap in GB on the tensor cache a sharing computer keeps; 0 turns it off
@@ -639,6 +639,9 @@ export interface ClusterSettingsData {
   // Read-only: this computer's GPU name ("Apple M2 Max GPU"), "" when
   // unknown; ignored on save (server.ClusterGPUName).
   gpu?: string;
+  // Read-only: this computer's GPUs (api.ClusterConfig.Devices); ignored on
+  // save.
+  devices?: { name: string; description?: string; total_memory: number }[];
   // Read-only: where each setting comes from, keyed by field name: "env"
   // (an OLLAMA_CLUSTER* variable, which the app can't override), "config"
   // (server.json) or "default". See api.ClusterConfig.
@@ -657,12 +660,15 @@ export async function getClusterSettings(): Promise<ClusterSettingsData> {
   return {
     enabled: Boolean(data.enabled),
     share: Boolean(data.share),
+    share_devices:
+      typeof data.share_devices === "string" ? data.share_devices : "",
     seeds: typeof data.seeds === "string" ? data.seeds : "",
     placement: data.placement === "greedy" ? "greedy" : "waterfill",
     cache_gb: typeof data.cache_gb === "number" ? data.cache_gb : 32,
     cache_used_bytes:
       typeof data.cache_used_bytes === "number" ? data.cache_used_bytes : 0,
     gpu: typeof data.gpu === "string" ? data.gpu : "",
+    devices: Array.isArray(data.devices) ? data.devices : [],
     sources:
       data.sources && typeof data.sources === "object" ? data.sources : {},
   };
@@ -686,12 +692,15 @@ export async function updateClusterSettings(
   return {
     enabled: Boolean(data.enabled),
     share: Boolean(data.share),
+    share_devices:
+      typeof data.share_devices === "string" ? data.share_devices : "",
     seeds: typeof data.seeds === "string" ? data.seeds : "",
     placement: data.placement === "greedy" ? "greedy" : "waterfill",
     cache_gb: typeof data.cache_gb === "number" ? data.cache_gb : 32,
     cache_used_bytes:
       typeof data.cache_used_bytes === "number" ? data.cache_used_bytes : 0,
     gpu: typeof data.gpu === "string" ? data.gpu : "",
+    devices: Array.isArray(data.devices) ? data.devices : [],
     sources:
       data.sources && typeof data.sources === "object" ? data.sources : {},
   };

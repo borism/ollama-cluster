@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -41,6 +42,7 @@ type clusterRunner struct {
 type clusterRunSettings struct {
 	share   bool
 	seeds   string
+	devices string
 	cacheGB uint
 }
 
@@ -59,6 +61,7 @@ func (r *clusterRunner) apply() {
 	want := clusterRunSettings{
 		share:   envconfig.ClusterShare(true),
 		seeds:   strings.Join(envconfig.ClusterSeeds(), ","),
+		devices: strings.Join(envconfig.ClusterShareDevices(), ","),
 		cacheGB: envconfig.ClusterCacheGB(),
 	}
 	enabled := envconfig.Cluster()
@@ -77,6 +80,22 @@ func (r *clusterRunner) apply() {
 	}
 }
 
+// filterSharedDevices keeps the devices whose ggml name (ml.DeviceInfo.Name,
+// e.g. "CUDA1", the same name rpc-server's -d takes) is in shared. An empty
+// shared list keeps everything.
+func filterSharedDevices(devs []ml.DeviceInfo, shared []string) []ml.DeviceInfo {
+	if len(shared) == 0 {
+		return devs
+	}
+	var out []ml.DeviceInfo
+	for _, d := range devs {
+		if slices.ContainsFunc(shared, func(s string) bool { return strings.EqualFold(s, d.Name) }) {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
 // startCluster starts LAN peer discovery (cluster.Start) and, unless
 // sharing is off, this instance's RPC worker (llm.StartRPCWorker). The
 // returned stop shuts both down and waits until discovery's UDP port is
@@ -88,7 +107,7 @@ func startCluster(parent context.Context, sched *Scheduler) (stop func()) {
 	rpcPort := func() int { return 0 }
 	if envconfig.ClusterShare(true) {
 		var err error
-		worker, err = llm.StartRPCWorker(0, envconfig.Models())
+		worker, err = llm.StartRPCWorker(0, envconfig.Models(), envconfig.ClusterShareDevices())
 		if err != nil {
 			slog.Warn("cluster: failed to start RPC worker, this instance will not share GPU capacity", "error", err)
 		} else {
@@ -101,10 +120,12 @@ func startCluster(parent context.Context, sched *Scheduler) (stop func()) {
 	}
 
 	table, err := cluster.Start(ctx, cluster.Config{
-		Port:        int(envconfig.ClusterPort()),
-		Interval:    5 * time.Second,
-		TTL:         15 * time.Second,
-		SelfDevices: func() []ml.DeviceInfo { return discover.GPUDevices(ctx, nil) },
+		Port:     int(envconfig.ClusterPort()),
+		Interval: 5 * time.Second,
+		TTL:      15 * time.Second,
+		SelfDevices: func() []ml.DeviceInfo {
+			return filterSharedDevices(discover.GPUDevices(ctx, nil), envconfig.ClusterShareDevices())
+		},
 		SelfRPCPort: rpcPort,
 		SelfLoad:    sched.clusterLoad,
 		Seeds:       envconfig.ClusterSeeds(),
@@ -159,22 +180,31 @@ func logClusterPeers(ctx context.Context, table *cluster.Table) {
 	}
 }
 
+// localGPUDevices lists this machine's GPUs; a variable so tests can fake it.
+var localGPUDevices = func(ctx context.Context) []ml.DeviceInfo { return discover.GPUDevices(ctx, nil) }
+
 // currentClusterConfig is what GET and POST /api/cluster/config return.
-func currentClusterConfig() api.ClusterConfig {
+func currentClusterConfig(ctx context.Context) api.ClusterConfig {
+	var devices []api.ClusterDevice
+	for _, d := range localGPUDevices(ctx) {
+		devices = append(devices, api.ClusterDevice{Name: d.Name, Description: d.Description, TotalMemory: d.TotalMemory})
+	}
 	return api.ClusterConfig{
 		Enabled:        envconfig.Cluster(),
 		Share:          envconfig.ClusterShare(true),
 		Seeds:          strings.Join(envconfig.ClusterSeeds(), ","),
+		ShareDevices:   strings.Join(envconfig.ClusterShareDevices(), ","),
 		Placement:      cmp.Or(envconfig.ClusterPlacement(), "waterfill"),
 		CacheGB:        envconfig.ClusterCacheGB(),
 		CacheUsedBytes: llm.RPCCacheBytes(envconfig.Models()),
 		Sources:        envconfig.ClusterSources(),
+		Devices:        devices,
 	}
 }
 
 // ClusterConfigHandler returns this instance's cluster-mode settings.
 func (s *Server) ClusterConfigHandler(c *gin.Context) {
-	c.JSON(http.StatusOK, currentClusterConfig())
+	c.JSON(http.StatusOK, currentClusterConfig(c.Request.Context()))
 }
 
 // UpdateClusterConfigHandler saves changed cluster settings in this
@@ -214,6 +244,9 @@ func (s *Server) UpdateClusterConfigHandler(c *gin.Context) {
 		}
 		set["cluster_seeds"] = strings.TrimSpace(*req.Seeds)
 	}
+	if req.ShareDevices != nil {
+		set["cluster_share_devices"] = strings.TrimSpace(*req.ShareDevices)
+	}
 	if req.Placement != nil {
 		if err := cluster.ValidatePlacement(*req.Placement); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -236,7 +269,7 @@ func (s *Server) UpdateClusterConfigHandler(c *gin.Context) {
 	if s.cluster != nil {
 		s.cluster.apply()
 	}
-	c.JSON(http.StatusOK, currentClusterConfig())
+	c.JSON(http.StatusOK, currentClusterConfig(c.Request.Context()))
 }
 
 // requestFromLoopback reports whether r's TCP peer is a loopback address.

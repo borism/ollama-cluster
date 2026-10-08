@@ -33,20 +33,32 @@ func ClusterShare(defaultValue bool) bool {
 	return clusterBool("OLLAMA_CLUSTER_SHARE", serverConfigValue(func(c serverConfigData) *bool { return c.ClusterShare }), defaultValue)
 }
 
+// ClusterShareDevices is a comma-separated list of ggml device names
+// ("CUDA1,Vulkan0") to share instead of every accelerator, passed to the
+// RPC worker as -d (tools/rpc/rpc-server.cpp in ggml-org/llama.cpp) and used
+// to filter what discovery advertises. Empty means all devices.
+func ClusterShareDevices() []string {
+	return splitList(clusterString("OLLAMA_CLUSTER_SHARE_DEVICES", serverConfigValue(func(c serverConfigData) *string { return c.ClusterShareDevices }), ""))
+}
+
 // ClusterSeeds is a comma-separated "host:port,host:port" list of
 // cluster-discovery beacon addresses to unicast directly to, for reaching
 // peers outside this host's broadcast domain (see cluster.Config.Seeds --
 // UDP broadcast doesn't cross a subnet/VLAN). Only meaningful when Cluster
 // is on. Empty by default: same-subnet broadcast discovery needs no seeds.
 func ClusterSeeds() []string {
-	raw := clusterString("OLLAMA_CLUSTER_SEEDS", serverConfigValue(func(c serverConfigData) *string { return c.ClusterSeeds }), "")
-	var seeds []string
+	return splitList(clusterString("OLLAMA_CLUSTER_SEEDS", serverConfigValue(func(c serverConfigData) *string { return c.ClusterSeeds }), ""))
+}
+
+// splitList splits a comma list, trimming entries and dropping empty ones.
+func splitList(raw string) []string {
+	var out []string
 	for _, s := range strings.Split(raw, ",") {
 		if s = strings.TrimSpace(s); s != "" {
-			seeds = append(seeds, s)
+			out = append(out, s)
 		}
 	}
-	return seeds
+	return out
 }
 
 // ClusterPlacement selects how cluster.SelectRPCServers picks peers: "" or
@@ -91,11 +103,12 @@ func ClusterSources() map[string]string {
 		}
 	}
 	return map[string]string{
-		"enabled":   source("OLLAMA_CLUSTER", c.Cluster != nil),
-		"share":     source("OLLAMA_CLUSTER_SHARE", c.ClusterShare != nil),
-		"seeds":     source("OLLAMA_CLUSTER_SEEDS", c.ClusterSeeds != nil),
-		"placement": source("OLLAMA_CLUSTER_PLACEMENT", c.ClusterPlacement != nil),
-		"cache_gb":  source("OLLAMA_CLUSTER_CACHE_GB", c.ClusterCacheGB != nil),
+		"enabled":       source("OLLAMA_CLUSTER", c.Cluster != nil),
+		"share":         source("OLLAMA_CLUSTER_SHARE", c.ClusterShare != nil),
+		"seeds":         source("OLLAMA_CLUSTER_SEEDS", c.ClusterSeeds != nil),
+		"share_devices": source("OLLAMA_CLUSTER_SHARE_DEVICES", c.ClusterShareDevices != nil),
+		"placement":     source("OLLAMA_CLUSTER_PLACEMENT", c.ClusterPlacement != nil),
+		"cache_gb":      source("OLLAMA_CLUSTER_CACHE_GB", c.ClusterCacheGB != nil),
 	}
 }
 

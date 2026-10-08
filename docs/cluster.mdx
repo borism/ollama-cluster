@@ -51,11 +51,14 @@ server's `~/.ollama/server.json`, so it survives restarts. For the Linux
 service that file is `/usr/share/ollama/.ollama/server.json`: the server
 writes it itself, so it lands in the right place whichever user runs the
 service. `ollama cluster off` turns it off again, and `ollama cluster
-status` shows every cluster setting and where it comes from. The other
+status` shows every cluster setting and where it comes from, followed by
+this machine's GPUs, one per line, with the device name `share-devices`
+takes and whether peers can use it. The other
 settings in the table below are changed the same way:
 
 ```shell
 ollama cluster set share off                # use peers' GPUs without sharing this one
+ollama cluster set share-devices CUDA1      # share only this GPU ("" = all)
 ollama cluster set seeds 192.0.2.10:11435   # "" clears
 ollama cluster set placement greedy
 ollama cluster set cache-gb 64
@@ -89,11 +92,17 @@ right below "Expose Ollama to the network". It changes the same settings as
 without a restart, so the app, the menu and the command line always agree.
 The switches map onto:
 
+![Cluster settings on a machine with two GPUs, sharing only the first](./images/cluster-share-gpus.png)
+
 - **Cluster mode** -- `OLLAMA_CLUSTER`.
-- **Share the \<GPU name\> GPU**, e.g. "Share the Apple M2 Max GPU" --
-  `OLLAMA_CLUSTER_SHARE` (disabled while cluster mode is off). It reads
-  "Share this computer's GPU" on a machine without one, or before the
-  server has started.
+- **Share this computer's GPUs** -- one switch per GPU, labelled with
+  its name, ggml device name and memory (disabled while cluster mode is
+  off). All on shares every GPU (`OLLAMA_CLUSTER_SHARE` on,
+  `OLLAMA_CLUSTER_SHARE_DEVICES` empty); some on shares only those
+  (`OLLAMA_CLUSTER_SHARE_DEVICES` set to their names); all off turns
+  `OLLAMA_CLUSTER_SHARE` off. On a machine without a GPU it is a single
+  **Share this computer's CPU** switch. The switches are locked when
+  either variable is set in the environment.
 - **Placement** -- `OLLAMA_CLUSTER_PLACEMENT`, Waterfill (the default) or
   Greedy (disabled while cluster mode is off).
 - **Tensor cache** -- `OLLAMA_CLUSTER_CACHE_GB`, the cache's size cap in GB;
@@ -102,10 +111,13 @@ The switches map onto:
   `host:port` list; rejected with an inline error if it doesn't parse as
   that.
 
-On macOS, the menu-bar menu has **Cluster Mode** and **Share the \<GPU
-name\> GPU** items, each with a green (on) or red (off) dot; click one
-to switch it. A **Placement** submenu below them picks the placement
-policy. macOS asks once
+On macOS, the menu-bar menu has a **Cluster Mode** item and one share item
+per GPU, like the Settings page: **Share \<GPU name\>** for each GPU (with
+the device name added if two GPUs have the same name), **Share the \<GPU
+name\> GPU** on a machine with one, or **Share this computer's CPU** on a
+machine without. Each has a green (on) or red (off) dot; click one to
+switch it. A **Placement** submenu below them picks the placement policy.
+macOS asks once
 whether Ollama may find devices on local networks; discovery needs that
 allowed (System Settings > Privacy & Security > Local Network).
 
@@ -138,11 +150,14 @@ moves tensors, not driver-specific code:
 ```
 ID                ADDRESS        SHARING    DEVICES                    LOAD    LATENCY    BANDWIDTH    LAST SEEN
 9f3a1c7e2b804d61  192.0.2.11     yes        CUDA0 (14.2 GiB free)      12%     4ms        890 Mbps     3 seconds ago
+                                             CUDA1 (22.6 GiB free)
 0c88e4a1f5d23b90  192.0.2.12     yes        Vulkan0 (11.8 GiB free)    0%      0.71ms     -            8 seconds ago
 5e21bb4f0a9c7712  192.0.2.13     no         Metal0 (9.0 GiB free)      45%     -          -            a minute ago
 ```
 
-(addresses above are placeholders, not real hosts.) A peer that isn't
+(addresses above are placeholders, not real hosts.) A peer with several
+GPUs lists each on its own line, and only the ones it shares (see
+`share-devices`). A peer that isn't
 sharing (`SHARING no`) still shows up with its devices — useful for
 seeing what's on the LAN even before it opts in — but placement will
 never pick it. LATENCY is a round-trip TCP dial, measured every 10
@@ -225,6 +240,7 @@ wins over the saved value; `ollama cluster status` shows which one applies.
 | `OLLAMA_CLUSTER` (`cluster`) | off | Turn on LAN discovery and (unless disabled below) donate spare GPU capacity to peers. |
 | `OLLAMA_CLUSTER_SHARE` (`cluster_share`) | `true` | Set to `0`/`false` to discover and use peers' capacity without donating this machine's own. |
 | `OLLAMA_CLUSTER_PORT` | `11435` | UDP port used for discovery beacons. Must match across a fleet if changed. |
+| `OLLAMA_CLUSTER_SHARE_DEVICES` (`cluster_share_devices`) | all | Comma-separated ggml device names (`CUDA1`, `Vulkan0`) to share instead of every accelerator, passed to the worker as `-d` and the only devices peers see. |
 | `OLLAMA_CLUSTER_SEEDS` (`cluster_seeds`) | none | Comma-separated `host:port` list of peers to unicast directly to, for reaching machines outside this host's broadcast domain (a different subnet or VLAN — broadcast discovery doesn't cross those). Not needed on a flat LAN. |
 | `OLLAMA_CLUSTER_PLACEMENT` (`cluster_placement`) | `waterfill` | How peers are chosen when more than one has spare capacity: `waterfill` weighs peers by measured load and latency and can spread a shortfall across several; `greedy` instead just ranks by free memory and adds peers until the shortfall's covered. |
 | `OLLAMA_CLUSTER_CACHE_GB` (`cluster_cache_gb`) | `32` | Cap on the tensor cache a sharing machine keeps in `~/.ollama/models/rpc/`: weights peers loaded onto it, so loading the same model again skips the network. The oldest files go first when it's over the cap or the disk has under 10 GiB free, and files that don't match their hash (a write cut short) are deleted. `0` turns the cache off. |

@@ -94,7 +94,9 @@ vi.mock("@tanstack/react-query", async (importOriginal) => ({
     if (queryKey[0] === "clusterSettings") {
       // Cluster mode off with no seeds needs no reset, so the reset-to-
       // defaults tests below don't have to account for it.
-      return { data: { enabled: false, share: true, seeds: "" } };
+      return {
+        data: { enabled: false, share: true, share_devices: "", seeds: "" },
+      };
     }
     return { data: { defaultContextLength: 65_536 } };
   },

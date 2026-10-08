@@ -30,7 +30,12 @@ requests that need it — the rest of Ollama's UX (pull, run, the API) is
 unchanged.
 
 - **Opt-in and per-machine.** A machine can consume peers' capacity without
-  donating its own (`ollama cluster set share off`), or vice versa.
+  donating its own (`ollama cluster set share off`), or vice versa. On a
+  machine with several GPUs, `ollama cluster set share-devices CUDA1`
+  shares only that one and keeps the rest for local work; `ollama cluster
+  status` lists the machine's GPUs, one per line, with their device names
+  and whether each is shared. The desktop app's Settings and the macOS
+  menu bar have a share switch per GPU.
 - **Hub-and-spoke, not a mesh.** llama.cpp's RPC protocol is client/server
   with no worker-to-worker traffic, so unlike
   [EXO](https://github.com/exo-explore/exo)'s peer-election ring, one
@@ -48,11 +53,13 @@ and Metal machines freely (RPC only moves tensors, not driver-specific code):
 ```
 ID                ADDRESS        SHARING    DEVICES                    LOAD    LATENCY    BANDWIDTH    LAST SEEN
 9f3a1c7e2b804d61  192.0.2.11     yes        CUDA0 (14.2 GiB free)      12%     4ms        890 Mbps     3 seconds ago
+                                             CUDA1 (22.6 GiB free)
 0c88e4a1f5d23b90  192.0.2.12     yes        Vulkan0 (11.8 GiB free)    0%      0.71ms     -            8 seconds ago
 5e21bb4f0a9c7712  192.0.2.13     no         Metal0 (9.0 GiB free)      45%     -          -            a minute ago
 ```
 
-(addresses above are placeholders, not real hosts.)
+(addresses above are placeholders, not real hosts.) A peer with several
+GPUs lists each on its own line, and only the ones it shares.
 
 **It works, and it's fast(er):** on a real LAN fleet, models too big for the
 head's own GPU go from 2–4 tok/s CPU-only to 15–75 tok/s with cluster

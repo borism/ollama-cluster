@@ -885,11 +885,12 @@ type ClusterListResponse struct {
 // ClusterConfig is this instance's cluster-mode settings, from GET and
 // POST /api/cluster/config ([Client.ClusterConfig]).
 type ClusterConfig struct {
-	Enabled   bool   `json:"enabled"`
-	Share     bool   `json:"share"`
-	Seeds     string `json:"seeds"`
-	Placement string `json:"placement"`
-	CacheGB   uint   `json:"cache_gb"`
+	Enabled      bool   `json:"enabled"`
+	Share        bool   `json:"share"`
+	Seeds        string `json:"seeds"`
+	ShareDevices string `json:"share_devices"`
+	Placement    string `json:"placement"`
+	CacheGB      uint   `json:"cache_gb"`
 	// CacheUsedBytes is what the tensor cache holds now. Read-only: POST
 	// ignores it.
 	CacheUsedBytes uint64 `json:"cache_used_bytes"`
@@ -898,16 +899,20 @@ type ClusterConfig struct {
 	// environment, which always wins), "config" (the server's
 	// ~/.ollama/server.json, which POST writes) or "default".
 	Sources map[string]string `json:"sources"`
+	// Devices is this machine's GPUs, whose Name is what ShareDevices
+	// takes. Read-only: POST ignores it.
+	Devices []ClusterDevice `json:"devices"`
 }
 
 // ClusterConfigRequest changes the cluster settings it sets; nil fields
 // keep their current value. See [Client.UpdateClusterConfig].
 type ClusterConfigRequest struct {
-	Enabled   *bool   `json:"enabled,omitempty"`
-	Share     *bool   `json:"share,omitempty"`
-	Seeds     *string `json:"seeds,omitempty"`
-	Placement *string `json:"placement,omitempty"`
-	CacheGB   *uint   `json:"cache_gb,omitempty"`
+	Enabled      *bool   `json:"enabled,omitempty"`
+	Share        *bool   `json:"share,omitempty"`
+	Seeds        *string `json:"seeds,omitempty"`
+	ShareDevices *string `json:"share_devices,omitempty"`
+	Placement    *string `json:"placement,omitempty"`
+	CacheGB      *uint   `json:"cache_gb,omitempty"`
 }
 
 // ClusterPeer is one other ollama-cluster instance seen on the LAN, from
@@ -937,7 +942,10 @@ type ClusterPeer struct {
 
 // ClusterDevice is one GPU (or CPU) a [ClusterPeer] reports as available.
 type ClusterDevice struct {
-	Name        string `json:"name"`
+	Name string `json:"name"`
+	// Description is the GPU's marketing name; only set in
+	// [ClusterConfig.Devices].
+	Description string `json:"description,omitempty"`
 	TotalMemory uint64 `json:"total_memory"`
 	FreeMemory  uint64 `json:"free_memory"`
 }

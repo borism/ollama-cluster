@@ -12,6 +12,7 @@ import (
 
 	"github.com/borism/ollama-cluster/api"
 	"github.com/borism/ollama-cluster/envconfig"
+	"github.com/borism/ollama-cluster/ml"
 )
 
 // clusterTestHome points the server's ~/.ollama/server.json at a temp dir
@@ -21,11 +22,18 @@ func clusterTestHome(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
-	for _, k := range []string{"OLLAMA_CLUSTER", "OLLAMA_CLUSTER_SHARE", "OLLAMA_CLUSTER_SEEDS", "OLLAMA_CLUSTER_PLACEMENT", "OLLAMA_CLUSTER_CACHE_GB"} {
+	for _, k := range []string{"OLLAMA_CLUSTER", "OLLAMA_CLUSTER_SHARE", "OLLAMA_CLUSTER_SEEDS", "OLLAMA_CLUSTER_SHARE_DEVICES", "OLLAMA_CLUSTER_PLACEMENT", "OLLAMA_CLUSTER_CACHE_GB"} {
 		t.Setenv(k, "")
 	}
 	envconfig.ReloadServerConfig()
 	t.Cleanup(envconfig.ReloadServerConfig)
+
+	// No real GPU discovery in tests.
+	orig := localGPUDevices
+	localGPUDevices = func(context.Context) []ml.DeviceInfo {
+		return []ml.DeviceInfo{{Name: "CUDA0", Description: "Test GPU", TotalMemory: 8 << 30}}
+	}
+	t.Cleanup(func() { localGPUDevices = orig })
 }
 
 // fakeClusterRunner counts starts and stops instead of binding real ports.
@@ -115,5 +123,18 @@ func TestUpdateClusterConfigHandler(t *testing.T) {
 	}
 	if !got.Enabled || got.Sources["enabled"] != "config" || *starts != 1 {
 		t.Errorf("after on: %+v, starts=%d; want enabled from config, started once", got, *starts)
+	}
+	if len(got.Devices) != 1 || got.Devices[0].Name != "CUDA0" || got.Devices[0].Description != "Test GPU" || got.Devices[0].TotalMemory != 8<<30 {
+		t.Errorf("devices = %+v, want the one local GPU", got.Devices)
+	}
+}
+
+func TestFilterSharedDevices(t *testing.T) {
+	devs := []ml.DeviceInfo{{Name: "CUDA0"}, {Name: "CUDA1"}}
+	if got := filterSharedDevices(devs, nil); len(got) != 2 {
+		t.Errorf("empty list should keep all, got %v", got)
+	}
+	if got := filterSharedDevices(devs, []string{"cuda1"}); len(got) != 1 || got[0].Name != "CUDA1" {
+		t.Errorf("want only CUDA1, got %v", got)
 	}
 }

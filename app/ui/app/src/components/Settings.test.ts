@@ -34,6 +34,7 @@ describe("Settings defaults", () => {
       currentClusterSettings: {
         enabled: true,
         share: false,
+        share_devices: "",
         seeds: "",
         placement: "greedy",
         cache_gb: 64,
@@ -43,6 +44,7 @@ describe("Settings defaults", () => {
     expect(updateCluster).toHaveBeenCalledWith({
       enabled: false,
       share: true,
+      share_devices: "",
       seeds: "",
       placement: "waterfill",
       cache_gb: 32,

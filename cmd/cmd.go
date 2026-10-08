@@ -1325,7 +1325,7 @@ func ClusterListHandler(cmd *cobra.Command, args []string) error {
 			p.ID,
 			p.Addr,
 			sharing,
-			strings.Join(devices, ", "),
+			strings.Join(devices, "\n"),
 			fmt.Sprintf("%.0f%%", p.Load*100),
 			latency,
 			bandwidth,
@@ -1354,6 +1354,7 @@ var clusterSettingKeys = []struct{ json, name, env string }{
 	{"enabled", "cluster", "OLLAMA_CLUSTER"},
 	{"share", "share", "OLLAMA_CLUSTER_SHARE"},
 	{"seeds", "seeds", "OLLAMA_CLUSTER_SEEDS"},
+	{"share_devices", "share-devices", "OLLAMA_CLUSTER_SHARE_DEVICES"},
 	{"placement", "placement", "OLLAMA_CLUSTER_PLACEMENT"},
 	{"cache_gb", "cache-gb", "OLLAMA_CLUSTER_CACHE_GB"},
 }
@@ -1367,11 +1368,12 @@ func onOff(b bool) string {
 
 func printClusterConfig(cfg *api.ClusterConfig) {
 	values := map[string]string{
-		"enabled":   onOff(cfg.Enabled),
-		"share":     onOff(cfg.Share),
-		"seeds":     cmp.Or(cfg.Seeds, "-"),
-		"placement": cfg.Placement,
-		"cache_gb":  fmt.Sprintf("%d (%s used)", cfg.CacheGB, format.HumanBytes2(cfg.CacheUsedBytes)),
+		"enabled":       onOff(cfg.Enabled),
+		"share":         onOff(cfg.Share),
+		"seeds":         cmp.Or(cfg.Seeds, "-"),
+		"share_devices": cmp.Or(cfg.ShareDevices, "all"),
+		"placement":     cfg.Placement,
+		"cache_gb":      fmt.Sprintf("%d (%s used)", cfg.CacheGB, format.HumanBytes2(cfg.CacheUsedBytes)),
 	}
 	var data [][]string
 	for _, k := range clusterSettingKeys {
@@ -1384,9 +1386,17 @@ func printClusterConfig(cfg *api.ClusterConfig) {
 		}
 		data = append(data, []string{k.name, values[k.json], from})
 	}
+	printClusterTable([]string{"SETTING", "VALUE", "FROM"}, data)
 
+	if devices := clusterDeviceRows(cfg); len(devices) > 0 {
+		fmt.Println()
+		printClusterTable([]string{"DEVICE", "NAME", "MEMORY", "SHARED"}, devices)
+	}
+}
+
+func printClusterTable(header []string, data [][]string) {
 	table := tablewriter.NewWriter(os.Stdout)
-	table.SetHeader([]string{"SETTING", "VALUE", "FROM"})
+	table.SetHeader(header)
 	table.SetAutoWrapText(false)
 	table.SetHeaderAlignment(tablewriter.ALIGN_LEFT)
 	table.SetAlignment(tablewriter.ALIGN_LEFT)
@@ -1396,6 +1406,27 @@ func printClusterConfig(cfg *api.ClusterConfig) {
 	table.SetTablePadding("    ")
 	table.AppendBulk(data)
 	table.Render()
+}
+
+// clusterDeviceRows lists this machine's GPUs, one row each, with whether
+// peers can use it: none while sharing is off, all when share-devices is
+// empty, otherwise the ones it names (matched like the server does).
+func clusterDeviceRows(cfg *api.ClusterConfig) [][]string {
+	var shared []string
+	for _, s := range strings.Split(cfg.ShareDevices, ",") {
+		if s = strings.TrimSpace(s); s != "" {
+			shared = append(shared, s)
+		}
+	}
+	var rows [][]string
+	for _, d := range cfg.Devices {
+		on := "no"
+		if cfg.Share && (len(shared) == 0 || slices.ContainsFunc(shared, func(s string) bool { return strings.EqualFold(s, d.Name) })) {
+			on = "yes"
+		}
+		rows = append(rows, []string{d.Name, cmp.Or(d.Description, "-"), format.HumanBytes2(d.TotalMemory), on})
+	}
+	return rows
 }
 
 func ClusterStatusHandler(cmd *cobra.Command, args []string) error {
@@ -1457,6 +1488,8 @@ func ClusterSetHandler(cmd *cobra.Command, args []string) error {
 		req.Share = &b
 	case "seeds":
 		req.Seeds = &value
+	case "share-devices":
+		req.ShareDevices = &value
 	case "placement":
 		req.Placement = &value
 	case "cache-gb":
@@ -1467,7 +1500,7 @@ func ClusterSetHandler(cmd *cobra.Command, args []string) error {
 		gb := uint(n)
 		req.CacheGB = &gb
 	default:
-		return fmt.Errorf("unknown cluster setting %q: expected share, seeds, placement or cache-gb", key)
+		return fmt.Errorf("unknown cluster setting %q: expected share, share-devices, seeds, placement or cache-gb", key)
 	}
 	for _, k := range clusterSettingKeys {
 		if k.name == key {
@@ -2818,6 +2851,7 @@ func NewCLI() *cobra.Command {
 		Long: `Change a cluster setting, without restarting the server. Settings:
 
   share on|off           share this machine's GPU with peers (default on)
+  share-devices DEV,...  share only these devices, e.g. CUDA1 ("" = all)
   seeds HOST:PORT,...    peers to reach directly on other subnets ("" clears)
   placement waterfill|greedy
                          how peers are picked when a model doesn't fit

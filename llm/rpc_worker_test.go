@@ -22,7 +22,7 @@ func TestRPCWorkerStartStop(t *testing.T) {
 	}
 
 	cacheDir := t.TempDir()
-	w, err := StartRPCWorker(0, cacheDir)
+	w, err := StartRPCWorker(0, cacheDir, nil)
 	if err != nil {
 		t.Fatalf("StartRPCWorker: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestRPCWorkerLogsUnexpectedExit(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
 	defer slog.SetDefault(prev)
 
-	w, err := StartRPCWorker(0, "")
+	w, err := StartRPCWorker(0, "", nil)
 	if err != nil {
 		t.Fatalf("StartRPCWorker: %v", err)
 	}
@@ -174,6 +174,18 @@ func TestPickFreeTCPPort(t *testing.T) {
 		t.Fatalf("port %d not usable right after picking it: %v", port, err)
 	}
 	l.Close()
+}
+
+func TestRPCDeviceArgs(t *testing.T) {
+	if got := strings.Join(rpcDeviceArgs([]string{"CUDA1"}), " "); got != "-d CUDA1" {
+		t.Errorf("one device: %q", got)
+	}
+	if got := strings.Join(rpcDeviceArgs([]string{"CUDA0", "Vulkan1"}), " "); got != "-d CUDA0,Vulkan1" {
+		t.Errorf("two devices: %q", got)
+	}
+	if got := rpcDeviceArgs(nil); len(got) != 0 {
+		t.Errorf("no devices should add no -d, got %q", got)
+	}
 }
 
 func TestRPCRestartBackoff(t *testing.T) {

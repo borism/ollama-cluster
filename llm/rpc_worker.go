@@ -48,12 +48,21 @@ func FindRPCWorker() (string, error) {
 	return path, nil
 }
 
+// rpcDeviceArgs is the -d flag limiting ggml-rpc-server to devices, if any.
+func rpcDeviceArgs(devices []string) []string {
+	if len(devices) == 0 {
+		return nil
+	}
+	return []string{"-d", strings.Join(devices, ",")}
+}
+
 // StartRPCWorker launches ggml-rpc-server so this instance can donate spare
 // compute to another instance's model load over llama.cpp RPC. port=0 picks
 // any free port -- call Port()/Addr() on the result to find out which one.
 // cacheDir, when non-empty, turns on the worker's local tensor cache
 // (-c/--cache) so a model already sent once over RPC isn't re-sent on every
-// load.
+// load. devices, when non-empty, limits the worker to those ggml devices
+// (-d, e.g. "CUDA1"); otherwise it exposes every accelerator.
 //
 // Returns once the worker is actually accepting TCP connections, or once it
 // exits or times out trying. ggml-rpc-server's only startup log line
@@ -61,7 +70,7 @@ func FindRPCWorker() (string, error) {
 // before the listening socket is bound, so it can't be used as a readiness
 // signal -- a bounded connect-retry loop against the port is what's actually
 // robust here.
-func StartRPCWorker(port int, cacheDir string) (*RPCWorker, error) {
+func StartRPCWorker(port int, cacheDir string, devices []string) (*RPCWorker, error) {
 	exe, err := FindRPCWorker()
 	if err != nil {
 		return nil, err
@@ -79,6 +88,7 @@ func StartRPCWorker(port int, cacheDir string) (*RPCWorker, error) {
 	// bind. Add a host param if one shows up.
 	host := "0.0.0.0"
 	args := []string{"-H", host, "-p", strconv.Itoa(port)}
+	args = append(args, rpcDeviceArgs(devices)...)
 	// rpc-server.cpp puts its cache in $LLAMA_CACHE + "rpc/" (see below).
 	rpcCache := filepath.Join(cacheDir, "rpc")
 	maxCache := uint64(envconfig.ClusterCacheGB()) << 30

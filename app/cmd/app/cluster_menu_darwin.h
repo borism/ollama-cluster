@@ -6,9 +6,9 @@
 bool ClusterMenuState(bool *enabled, bool *share, bool *greedy,
                       bool *enabledLocked, bool *shareLocked, bool *placementLocked);
 void SetClusterModeEnabled(bool enabled);
-void SetClusterShareEnabled(bool share);
+void ToggleClusterShare(char *name);
 void SetClusterPlacementGreedy(bool greedy);
-char *ClusterGPUName(void);
+char *ClusterShareItems(void);
 
 @interface AppDelegate (Cluster)
 - (void)addClusterMenuItemsTo:(NSMenu *)menu;

@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -2910,5 +2911,37 @@ func TestFormerAgentEntryPointsAreRejected(t *testing.T) {
 				t.Fatalf("former agent entry point %q returned %v, want unknown command or flag", args, err)
 			}
 		})
+	}
+}
+
+func TestClusterDeviceRows(t *testing.T) {
+	devices := []api.ClusterDevice{
+		{Name: "CUDA0", Description: "NVIDIA RTX A4500", TotalMemory: 20 << 30},
+		{Name: "CUDA1", Description: "NVIDIA RTX 4090", TotalMemory: 24 << 30},
+	}
+	shared := func(cfg api.ClusterConfig) []string {
+		var out []string
+		for _, r := range clusterDeviceRows(&cfg) {
+			out = append(out, r[0]+"="+r[3])
+		}
+		return out
+	}
+	cases := []struct {
+		name string
+		cfg  api.ClusterConfig
+		want []string
+	}{
+		{"all", api.ClusterConfig{Share: true, Devices: devices}, []string{"CUDA0=yes", "CUDA1=yes"}},
+		{"some", api.ClusterConfig{Share: true, ShareDevices: " cuda1 ", Devices: devices}, []string{"CUDA0=no", "CUDA1=yes"}},
+		{"share off", api.ClusterConfig{Share: false, ShareDevices: "CUDA1", Devices: devices}, []string{"CUDA0=no", "CUDA1=no"}},
+		{"no gpus", api.ClusterConfig{Share: true}, nil},
+	}
+	for _, tc := range cases {
+		if got := shared(tc.cfg); !slices.Equal(got, tc.want) {
+			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
+		}
+	}
+	if r := clusterDeviceRows(&api.ClusterConfig{Devices: devices[:1]})[0]; r[1] != "NVIDIA RTX A4500" || r[2] != "20.0 GiB" {
+		t.Errorf("row = %v", r)
 	}
 }
