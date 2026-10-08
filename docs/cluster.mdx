@@ -194,7 +194,19 @@ What this costs on a Mac without peers, per published benchmarks (not measured o
 
 So on a recent Mac that mostly runs small models on its own, `--runner mlx` is worth trying.
 
-MLX has its own multi-machine mode ([`mlx.distributed`](https://ml-explore.github.io/mlx/build/html/usage/distributed.html)), but it only joins machines that all run MLX, and its fast tensor-parallel mode needs Macs directly linked by Thunderbolt 5. Cluster mode uses llama.cpp RPC instead because it can mix CUDA, Vulkan, ROCm and Metal machines in one model.
+Running models across machines is what cluster mode is for, and there it does things MLX can't; see [Compared with MLX clustering](#compared-with-mlx-clustering).
+
+## Compared with MLX clustering
+
+MLX has its own multi-machine mode, [`mlx.distributed`](https://ml-explore.github.io/mlx/build/html/usage/distributed.html). For the hardware most people actually have, cluster mode is the more useful of the two:
+
+- **Any mix of hardware.** `mlx.distributed` only joins machines that all run MLX: Apple Silicon Macs, or NVIDIA GPUs through its young CUDA backend. Cluster mode puts CUDA, Vulkan, ROCm and Metal machines under one model, including Intel Macs, AMD cards and older NVIDIA GPUs that MLX can't use at all.
+- **Your existing network.** MLX's fast mode (tensor parallelism over JACCL) needs macOS 26.2+, Thunderbolt 5 on every Mac and a direct cable between every pair of them. Over an ordinary LAN, MLX falls back to TCP. Cluster mode works over the wired LAN you already have (a faster link helps; see [benchmarks](cluster-benchmarks.mdx)). On Thunderbolt 5 it also uses RDMA ([below](#rdma-over-thunderbolt-macos)).
+- **Little lost per machine.** On M2-class Macs and on models of 27B and up, llama.cpp and MLX run at about the same speed on one machine (see the numbers above), so using llama.cpp gives up little.
+- **Zero setup.** `ollama cluster on` on each machine finds peers and places layers automatically. `mlx.distributed` needs a hostfile and an `mlx.launch` command per run.
+- **Measured.** On a mixed LAN fleet, cluster mode takes models too big for one GPU from 2-4 tok/s CPU-only to 15-75 tok/s ([benchmarks](cluster-benchmarks.mdx)).
+
+Where MLX is ahead: on several Macs that are all linked by Thunderbolt 5, its tensor parallelism makes a model that already fits on one Mac run faster. Apple reports nearly 3x generation for a 27B model on four M3 Ultras ([WWDC26](https://developer.apple.com/videos/play/wwdc2026/233/)). Cluster mode splits a model by layers, which lets a model too big for one machine run at all, but doesn't speed up one that already fits.
 
 ## When it still doesn't fit
 

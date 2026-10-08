@@ -43,11 +43,14 @@ unchanged.
   capacity it borrows — no multi-hop scaling across many peers. Any machine
   can be the head for its own requests while donating to someone else's at
   the same time.
-- **llama.cpp builds over MLX.** Only llama.cpp can use peers, so when a
-  model ships both, ollama-cluster pulls and runs the llama.cpp (GGUF) build
-  on every platform, Apple Silicon included. `--runner mlx` still gets MLX,
-  which is faster on recent Macs running small models alone; see
-  [docs/cluster.mdx](docs/cluster.mdx#which-build-of-a-model-runs).
+- **Mixed hardware, any network, unlike MLX clustering.** Apple's
+  `mlx.distributed` only joins machines that all run MLX, and its fast
+  mode needs Thunderbolt 5 cables between every pair of Macs. Cluster mode
+  mixes NVIDIA, AMD, Intel and Apple GPUs over the LAN you already have, and
+  per machine llama.cpp is about as fast as MLX on M2-class Macs and 27B+
+  models. So ollama-cluster prefers a model's llama.cpp build on every
+  platform (`--runner mlx` still gets MLX). See
+  [docs/cluster.mdx](docs/cluster.mdx#compared-with-mlx-clustering).
 - **Insecure by design, same as upstream llama.cpp RPC.** Only enable this
   on a trusted LAN or VPN (Tailscale, WireGuard), never on an open network.
 
