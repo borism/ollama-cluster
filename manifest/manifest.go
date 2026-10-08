@@ -636,6 +636,13 @@ func ParseNamedManifestForRunner(n model.Name, runner string) (*Manifest, error)
 	return parseNamedManifest(n, runnerPreferencesFor(runner))
 }
 
+// ParseNamedManifestWithPreferences is ParseNamedManifestForRunner with a
+// fallback order: a manifest list resolves to the first runner in preferences
+// that has a local child.
+func ParseNamedManifestWithPreferences(n model.Name, preferences []string) (*Manifest, error) {
+	return parseNamedManifest(n, preferences)
+}
+
 func parseNamedManifest(n model.Name, preferences []string) (*Manifest, error) {
 	if !n.IsFullyQualified() {
 		return nil, model.Unqualified(n)
@@ -840,7 +847,13 @@ func selectManifestReferenceWithPreferences(manifests []Manifest, preferences []
 	return nil, fmt.Errorf("%w for runners: %s", ErrNoCompatibleManifest, strings.Join(preferences, ", "))
 }
 
-func runnerPreferences() []string {
+// DefaultRunnerPreferences is the order used when a request names no runner.
+// A variable so tests can simulate another platform.
+var DefaultRunnerPreferences = platformRunnerPreferences
+
+func runnerPreferences() []string { return DefaultRunnerPreferences() }
+
+func platformRunnerPreferences() []string {
 	if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" {
 		return []string{RunnerMLX, RunnerLlamaCPP, RunnerGGML}
 	}

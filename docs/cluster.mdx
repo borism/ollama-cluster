@@ -183,6 +183,10 @@ qwen3.8:27b      3f8c1a9d2e40   27 GB    0%/45%/55% CPU/GPU/RPC   192.0.2.12:500
 one is holding. No spillover: `CLUSTER` reads `-` and `PROCESSOR` stays the
 plain `CPU/GPU` (or `100% CPU`/`100% GPU`) form it always had.
 
+## Which build of a model runs
+
+When a model has both an MLX and a llama.cpp build (a manifest list) and the request doesn't name a runner, cluster mode uses the llama.cpp build as long as at least one peer is reachable, because only that path can use peers. With no reachable peers, or with `"runner"` set in the request, the usual platform default applies.
+
 ## When it still doesn't fit
 
 Cluster mode doesn't guarantee the model fits on GPUs at all — if local VRAM
