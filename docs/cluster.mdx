@@ -187,6 +187,15 @@ plain `CPU/GPU` (or `100% CPU`/`100% GPU`) form it always had.
 
 When a model has several builds (a manifest list), ollama-cluster prefers the llama.cpp (GGUF) build on every platform, including Apple Silicon, because only that path can use cluster peers. Pull and load both follow this order. To get the MLX build instead, pass `--runner mlx` or `"runner": "mlx"`. Models that only exist as MLX still work, but run locally only.
 
+What this costs on a Mac without peers, per published benchmarks (not measured on this project's fleet):
+
+- On M4 and M5 chips, MLX generates tokens roughly 20-90% faster than llama.cpp with small and mid-size models, e.g. Qwen3.5 35B-A3B at 4-bit on an M4 Max: about 113-124 tok/s with MLX vs 66-70 tok/s with llama.cpp ([Kapetanovic](https://antekapetanovic.com/blog/qwen3.5-apple-silicon-benchmark/)).
+- The gap closes on older chips and bigger models, where both are limited by memory bandwidth. On an M2 Max, MLX was about 2% faster at generation and llama.cpp about 1.4x faster at prompt processing ([Classmethod](https://dev.classmethod.jp/en/articles/apple-mlx-ollama-deep-dive/)).
+
+So on a recent Mac that mostly runs small models on its own, `--runner mlx` is worth trying.
+
+MLX has its own multi-machine mode ([`mlx.distributed`](https://ml-explore.github.io/mlx/build/html/usage/distributed.html)), but it only joins machines that all run MLX, and its fast tensor-parallel mode needs Macs directly linked by Thunderbolt 5. Cluster mode uses llama.cpp RPC instead because it can mix CUDA, Vulkan, ROCm and Metal machines in one model.
+
 ## When it still doesn't fit
 
 Cluster mode doesn't guarantee the model fits on GPUs at all — if local VRAM

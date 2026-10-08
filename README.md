@@ -43,6 +43,11 @@ unchanged.
   capacity it borrows — no multi-hop scaling across many peers. Any machine
   can be the head for its own requests while donating to someone else's at
   the same time.
+- **llama.cpp builds over MLX.** Only llama.cpp can use peers, so when a
+  model ships both, ollama-cluster pulls and runs the llama.cpp (GGUF) build
+  on every platform, Apple Silicon included. `--runner mlx` still gets MLX,
+  which is faster on recent Macs running small models alone; see
+  [docs/cluster.mdx](docs/cluster.mdx#which-build-of-a-model-runs).
 - **Insecure by design, same as upstream llama.cpp RPC.** Only enable this
   on a trusted LAN or VPN (Tailscale, WireGuard), never on an open network.
 
