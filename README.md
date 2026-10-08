@@ -66,14 +66,11 @@ head's own GPU go from 2–4 tok/s CPU-only to 15–75 tok/s with cluster
 offload — up to 8.6× — across 8 models and context sizes from 4K to 128K.
 For a 70B model (`deepseek-r1:70b`), cluster mode isn't just faster, it's
 the only way it runs at all — CPU-only fails outright with an out-of-memory
-error on a single machine. Two caveats: **greedy wins more often than
+error on a single machine. One caveat: **greedy wins more often than
 waterfill, but not always** — which of the two placement strategies is
-faster depends on the model and context size, so neither is a safe default;
-and **`qwen3.8:27b` doesn't benefit from cluster mode at all** — it's a
-hybrid Mamba/SSM architecture that llama.cpp's CUDA/RPC backends don't
-offload yet, so it silently runs full-CPU regardless of placement. See
-[`docs/cluster-benchmarks.mdx`](docs/cluster-benchmarks.mdx) for the full
-numbers, including open questions on both caveats.
+faster depends on the model and context size, so neither is a safe default.
+See [`docs/cluster-benchmarks.mdx`](docs/cluster-benchmarks.mdx) for the full
+numbers and open questions.
 
 See [`docs/cluster.mdx`](docs/cluster.mdx) for environment variables,
 per-request overrides, and current limitations.

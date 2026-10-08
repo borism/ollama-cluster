@@ -81,13 +81,8 @@ const (
 	openEndedGenerationContextMultiplier = 10
 )
 
-const (
-	llamaArgFitTargetEnv = "LLAMA_ARG_FIT_TARGET"
-	bytesPerMiB          = 1 << 20
-
-	// mmprojOffloadHeadroom leaves 1 GiB for backend buffers beyond projector weights.
-	mmprojOffloadHeadroom = 1 << 30
-)
+// mmprojOffloadHeadroom leaves 1 GiB for backend buffers beyond projector weights.
+const mmprojOffloadHeadroom = 1 << 30
 
 // DefaultEmbeddingNumBatchForContext caps the embedding batch default to the
 // active context length before it is passed to llama-server.
@@ -432,7 +427,7 @@ func startLlamaServer(launch llamaServerLaunchConfig, out io.Writer) (cmd *exec.
 		cmd.Stderr = out
 	}
 	cmd.SysProcAttr = LlamaServerSysProcAttr
-	SetupLlamaServerCommandEnv(cmd, exe, launch.gpuLibs, launch.extraEnvsForStart())
+	SetupLlamaServerCommandEnv(cmd, exe, launch.gpuLibs, launch.extraEnvs)
 
 	slog.Info("starting llama-server", "cmd", cmd)
 	slog.Debug("subprocess", "", filteredEnv(cmd.Env))
@@ -723,48 +718,10 @@ func shouldDisableMMProjOffload(opts api.Options, gpus []ml.DeviceInfo, modelLay
 	return false, ""
 }
 
-func (launch llamaServerLaunchConfig) extraEnvsForStart() map[string]string {
-	pad, ok := launch.mmprojFitTargetMiB()
-	if !ok {
-		return launch.extraEnvs
-	}
-
-	if existing, ok := launch.extraEnvs[llamaArgFitTargetEnv]; ok {
-		existingTarget, err := strconv.ParseUint(existing, 10, 64)
-		if err != nil {
-			slog.Warn("invalid llama-server fit target", "env", llamaArgFitTargetEnv, "value", existing, "error", err)
-			return launch.extraEnvs
-		}
-
-		envs := cloneStringMap(launch.extraEnvs)
-		envs[llamaArgFitTargetEnv] = strconv.FormatUint(existingTarget+pad, 10)
-		return envs
-	}
-
-	if _, ok := os.LookupEnv(llamaArgFitTargetEnv); ok {
-		// Preserve an inherited user override. SetupLlamaServerCommandEnv
-		// will pass it through unless extraEnvs overrides it.
-		return launch.extraEnvs
-	}
-
-	envs := cloneStringMap(launch.extraEnvs)
-	envs[llamaArgFitTargetEnv] = strconv.FormatUint(pad, 10)
-	return envs
-}
-
-func (launch llamaServerLaunchConfig) mmprojFitTargetMiB() (uint64, bool) {
-	if len(launch.projectors) == 0 || launch.mmprojMemory == 0 {
-		return 0, false
-	}
-	if disable, _ := launch.mmprojOffloadDisabled(); disable {
-		return 0, false
-	}
-
-	requiredMemory := launch.mmprojMemory + mmprojOffloadHeadroom
-	return (requiredMemory + bytesPerMiB - 1) / bytesPerMiB, true
-}
-
-// mmprojMemoryRequirement is a stopgap until fit accounts for mmproj memory directly.
+// mmprojMemoryRequirement estimates projector memory for the offload-to-CPU
+// decision only; llama-server fit already reserves projector memory itself
+// (tools/server/server-context.cpp, mtmd_get_memory_usage), so it must not also
+// be padded into LLAMA_ARG_FIT_TARGET.
 func mmprojMemoryRequirement(modelPath string, f *gguf.Model, projectors []string) (uint64, error) {
 	if len(projectors) == 0 {
 		return 0, nil
