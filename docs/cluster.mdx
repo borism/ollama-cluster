@@ -185,7 +185,7 @@ plain `CPU/GPU` (or `100% CPU`/`100% GPU`) form it always had.
 
 ## Which build of a model runs
 
-When a model has both an MLX and a llama.cpp build (a manifest list) and the request doesn't name a runner, cluster mode uses the llama.cpp build as long as at least one peer is reachable, because only that path can use peers. With no reachable peers, or with `"runner"` set in the request, the usual platform default applies.
+When a model has several builds (a manifest list), ollama-cluster prefers the llama.cpp (GGUF) build on every platform, including Apple Silicon, because only that path can use cluster peers. Pull and load both follow this order. To get the MLX build instead, pass `--runner mlx` or `"runner": "mlx"`. Models that only exist as MLX still work, but run locally only.
 
 ## When it still doesn't fit
 

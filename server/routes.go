@@ -231,48 +231,6 @@ func normalizeRunner(runner string) (string, error) {
 	}
 }
 
-// clusterRunnerPreferences is the manifest-list fallback order when cluster
-// peers can be used: only the llama.cpp path offloads to them.
-var clusterRunnerPreferences = []string{manifest.RunnerLlamaCPP, manifest.RunnerGGML, manifest.RunnerMLX}
-
-func getClusterModel(name string) (*Model, error) {
-	return getModel(name, func(n model.Name) (*manifest.Manifest, error) {
-		return manifest.ParseNamedManifestWithPreferences(n, clusterRunnerPreferences)
-	})
-}
-
-// dialRPC is a variable so tests don't need a real RPC worker.
-var dialRPC = cluster.DialRPC
-
-// resolveModel is GetModelForRunner plus the cluster runner preference. Every
-// load path (generate, chat, embed, ...) comes through scheduleRunner, so this
-// is the one place it is needed. MLX can't use cluster peers, so when the
-// platform default picked it from a manifest list and a peer is reachable,
-// take the llama.cpp build instead. An explicit runner always wins.
-func (s *Server) resolveModel(name, runner string, requestOpts map[string]any) (*Model, error) {
-	m, err := GetModelForRunner(name, runner)
-	if err != nil || runner != "" || m.Runner != manifest.RunnerMLX || m.ManifestDigest == m.Digest || !s.clusterPeerReachable(requestOpts) {
-		return m, err
-	}
-	if cm, err := getClusterModel(name); err == nil {
-		return cm, nil
-	}
-	return m, nil
-}
-
-// clusterPeerReachable reports whether cluster mode is on for this request
-// and a peer's RPC worker answers a dial (same test as Scheduler.load).
-func (s *Server) clusterPeerReachable(requestOpts map[string]any) bool {
-	table := s.sched.clusterTable.Load()
-	if table == nil {
-		return false
-	}
-	if auto, ok := requestOpts["rpc_auto"].(bool); ok && !auto {
-		return false
-	}
-	return cluster.AnyRPCReachable(table.Peers(), dialRPC)
-}
-
 // scheduleRunner schedules a runner after validating inputs such as capabilities and model options.
 // It returns the allocated runner, model instance, and consolidated options if successful and error otherwise.
 func (s *Server) scheduleRunner(ctx context.Context, name, selectedRunner string, caps []model.Capability, requestOpts map[string]any, keepAlive *api.Duration, shift *bool) (llm.LlamaServer, *Model, *api.Options, error) {
@@ -288,7 +246,7 @@ func (s *Server) scheduleRunner(ctx context.Context, name, selectedRunner string
 		}
 		name = existingName.String()
 	}
-	model, err := s.resolveModel(name, selectedRunner, requestOpts)
+	model, err := GetModelForRunner(name, selectedRunner)
 	if err != nil {
 		return nil, nil, nil, err
 	}

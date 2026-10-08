@@ -269,17 +269,6 @@ func SelectReachableRPCServers(gpus []ml.DeviceInfo, predicted uint64, peers []P
 	}
 }
 
-// AnyRPCReachable reports whether at least one peer sharing an RPC worker
-// accepts a connection via dial.
-func AnyRPCReachable(peers []Peer, dial func(addr string) error) bool {
-	for _, p := range peers {
-		if p.RPCPort != 0 && dial(rpcAddr(p)) == nil {
-			return true
-		}
-	}
-	return false
-}
-
 // DialRPC checks that addr accepts a TCP connection within probeTimeout,
 // the same check probeLoop times for Peer.Latency.
 func DialRPC(addr string) error {

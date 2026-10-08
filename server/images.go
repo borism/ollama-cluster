@@ -710,14 +710,8 @@ func GetModel(name string) (*Model, error) {
 // GetModelForRunner returns model metadata for name, selecting runner from a
 // manifest list when one is specified.
 func GetModelForRunner(name, runner string) (*Model, error) {
-	return getModel(name, func(n model.Name) (*manifest.Manifest, error) {
-		return manifest.ParseNamedManifestForRunner(n, runner)
-	})
-}
-
-func getModel(name string, parse func(model.Name) (*manifest.Manifest, error)) (*Model, error) {
 	n := model.ParseName(name)
-	mf, err := parse(n)
+	mf, err := manifest.ParseNamedManifestForRunner(n, runner)
 	if err != nil {
 		return nil, err
 	}
