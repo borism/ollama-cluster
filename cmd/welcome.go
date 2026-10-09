@@ -1,65 +1,25 @@
 package cmd
 
 import (
-	"context"
-	"errors"
-	"fmt"
-	"net/http"
 	"os"
-	"strings"
-	"time"
 
-	"github.com/borism/ollama-cluster/api"
 	"github.com/borism/ollama-cluster/cmd/config"
-	"github.com/borism/ollama-cluster/cmd/launch"
 	"github.com/borism/ollama-cluster/cmd/tui"
-	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
 
-func runWelcome(ctx context.Context) error {
+func runWelcome() error {
 	if !term.IsTerminal(int(os.Stdin.Fd())) || !term.IsTerminal(int(os.Stdout.Fd())) {
 		return nil
 	}
 	return ensureWelcome(func() error {
 		return tui.RunWelcome(tui.WelcomeOptions{
-			CheckAccount: func() tui.WelcomeAccount { return checkWelcomeAccount(ctx) },
-			OpenBrowser:  launch.OpenBrowser,
 			IsCompleted: func() bool {
 				needed, err := config.NeedsWelcome()
 				return err == nil && !needed
 			},
 		})
 	})
-}
-
-func checkWelcomeAccount(ctx context.Context) tui.WelcomeAccount {
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	cmd := &cobra.Command{}
-	cmd.SetContext(ctx)
-	if err := checkServerHeartbeat(cmd, nil); err != nil {
-		return tui.WelcomeAccount{Err: err}
-	}
-	client, err := api.ClientFromEnvironment()
-	if err != nil {
-		return tui.WelcomeAccount{Err: err}
-	}
-	if status, err := client.CloudStatusExperimental(ctx); err == nil && status.Cloud.Disabled {
-		return tui.WelcomeAccount{CloudDisabled: true}
-	}
-	user, err := client.Whoami(ctx)
-	if err != nil {
-		var authErr api.AuthorizationError
-		if errors.As(err, &authErr) && authErr.StatusCode == http.StatusUnauthorized && authErr.SigninURL != "" {
-			return tui.WelcomeAccount{SigninURL: authErr.SigninURL}
-		}
-		return tui.WelcomeAccount{Err: err}
-	}
-	if user != nil && strings.TrimSpace(user.Name) != "" {
-		return tui.WelcomeAccount{SignedIn: true}
-	}
-	return tui.WelcomeAccount{Err: fmt.Errorf("could not verify the Ollama account")}
 }
 
 func ensureWelcome(show func() error) error {
