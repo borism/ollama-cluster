@@ -840,11 +840,10 @@ func selectManifestReferenceWithPreferences(manifests []Manifest, preferences []
 	return nil, fmt.Errorf("%w for runners: %s", ErrNoCompatibleManifest, strings.Join(preferences, ", "))
 }
 
+// runnerPreferences differs from upstream, which prefers mlx on darwin/arm64:
+// MLX can't use cluster peers, so this fork prefers the llama.cpp builds
+// everywhere. mlx stays a fallback for models that only ship an MLX build.
 func runnerPreferences() []string {
-	if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" {
-		return []string{RunnerMLX, RunnerLlamaCPP, RunnerGGML}
-	}
-
 	return []string{RunnerLlamaCPP, RunnerGGML, RunnerMLX}
 }
 
