@@ -87,8 +87,10 @@ per-request overrides, and current limitations.
 
 ## Download
 
-**[v0.34.4-cluster.2](https://github.com/borism/ollama-cluster/releases/tag/v0.34.4-cluster.2)**
-is published. `scripts/install.sh` pulls from this fork's own
+**[v0.40.3-cluster.1](https://github.com/borism/ollama-cluster/releases/tag/v0.40.3-cluster.1)**
+is the latest release, based on upstream Ollama v0.40.3 (llama.cpp b11351).
+Versions are `v<upstream Ollama version>-cluster.<N>`, with N restarting at 1
+on each new upstream base. `scripts/install.sh` pulls from this fork's own
 [GitHub Releases](https://github.com/borism/ollama-cluster/releases) (not
 ollama.com) -- see [`docs/releasing.md`](docs/releasing.md) for the release
 pipeline's scope, current gaps, and how to cut the next one.

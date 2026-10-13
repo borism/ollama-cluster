@@ -85,7 +85,8 @@ free GPU memory and pass it to `llama-server` as an RPC worker.
 
 ## Desktop app
 
-The desktop app (macOS and Windows) has a Cluster mode section in Settings,
+The desktop app has a Cluster mode section in Settings (this fork only
+builds the macOS app; there is no Windows build yet),
 right below "Expose Ollama to the network". It changes the same settings as
 `ollama cluster on/off/set` (see [Enabling it](#enabling-it)): the app's
 `ollama serve` saves them in `~/.ollama/server.json` and applies them
@@ -234,8 +235,14 @@ connection on its RPC port (a firewall, macOS Local Network permission
 not granted, or it just went away) is skipped the same way: each picked
 peer gets a quick connection check before the model loads, and placement
 is redone without the ones that fail, with a `cluster: skipping
-unreachable peer` warning in the server log. Peers set by hand with
-`rpc_servers` aren't checked.
+unreachable peer` warning in the server log. If a peer passes that check
+but drops before `llama-server` connects to it, the load is retried once
+without that peer. Peers set by hand with `rpc_servers` aren't checked or
+retried.
+
+On a sharing machine, the RPC worker restarts itself if it exits
+unexpectedly, backing off from 1 second up to a minute between attempts.
+While it's down, the machine advertises itself as not sharing.
 
 A non-zero `CPU` share in `ollama ps` (see above) while cluster mode is on
 is the direct, visible confirmation this happened — not a bug.
@@ -316,9 +323,10 @@ a reverse proxy on the same machine would count as local.
 
 ## Benchmarks
 
-Real end-to-end runs on a live LAN fleet, 7 models × 3 context sizes:
-2–4 tok/s CPU-only vs 15–75 tok/s with cluster offload on models too big
-for the head's own GPU — up to 8.8× faster, no simulation involved. At 70B
+Real end-to-end runs on a live LAN fleet (the `v0.34.4-cluster.1` build),
+8 models at 4K, 32K and 128K context: 2–4 tok/s CPU-only vs 15–75 tok/s
+with cluster offload on models too big for the head's own GPU — up to
+8.6× faster, no simulation involved. At 70B
 (`deepseek-r1:70b`), cluster mode stops being a speedup and becomes a
 requirement: the CPU-only baseline fails outright with an out-of-memory
 error on a single machine, so this is the only way that model runs on this
@@ -334,7 +342,9 @@ per-model breakdown and caveats.
 - Cross-subnet discovery via `OLLAMA_CLUSTER_SEEDS` is implemented and
   unit-tested but has limited real-world mileage so far — same-subnet
   broadcast discovery is the well-exercised path.
-- Hybrid Mamba/SSM + attention models (GGUF metadata reports `*.ssm.*`
-  fields) don't offload to GPU or RPC peers at all in this build — an
-  upstream llama.cpp op-support gap, not a placement bug. See [Cluster
-  benchmarks](/cluster-benchmarks) for a measured example.
+- In the benchmark runs, `qwen3.8:27b` placed 0 of 66 layers on any GPU
+  or peer, and why is not established. It offloads normally on a single
+  machine, so it is not a limit of its hybrid SSM/attention architecture
+  as this page used to say. See [Cluster
+  benchmarks](/cluster-benchmarks).
+- The desktop app is macOS only; there is no Windows build yet.
