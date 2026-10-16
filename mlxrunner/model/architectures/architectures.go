@@ -8,6 +8,7 @@ import (
 	_ "github.com/borism/ollama-cluster/mlxrunner/model/gemma4embedding"
 	_ "github.com/borism/ollama-cluster/mlxrunner/model/glimmer"
 	_ "github.com/borism/ollama-cluster/mlxrunner/model/glm4_moe_lite"
+	_ "github.com/borism/ollama-cluster/mlxrunner/model/kev"
 	_ "github.com/borism/ollama-cluster/mlxrunner/model/laguna"
 	_ "github.com/borism/ollama-cluster/mlxrunner/model/laya"
 	_ "github.com/borism/ollama-cluster/mlxrunner/model/llama"
