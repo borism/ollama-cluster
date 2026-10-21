@@ -631,9 +631,10 @@ export interface ClusterSettingsData {
   share_devices: string;
   seeds: string;
   placement: ClusterPlacement;
-  // Cap in GB on the tensor cache a sharing computer keeps; 0 turns it off
+  // Cap in GB on the tensor cache a sharing computer keeps; 0 turns it off,
+  // null means no cap: it grows until the disk's free-space floor stops it
   // (OLLAMA_CLUSTER_CACHE_GB, llm/rpc_cache.go).
-  cache_gb: number;
+  cache_gb: number | null;
   // Read-only: what the tensor cache holds now, in bytes; ignored on save.
   cache_used_bytes?: number;
   // Read-only: this computer's GPU name ("Apple M2 Max GPU"), "" when
@@ -664,7 +665,7 @@ export async function getClusterSettings(): Promise<ClusterSettingsData> {
       typeof data.share_devices === "string" ? data.share_devices : "",
     seeds: typeof data.seeds === "string" ? data.seeds : "",
     placement: data.placement === "greedy" ? "greedy" : "waterfill",
-    cache_gb: typeof data.cache_gb === "number" ? data.cache_gb : 32,
+    cache_gb: typeof data.cache_gb === "number" ? data.cache_gb : null,
     cache_used_bytes:
       typeof data.cache_used_bytes === "number" ? data.cache_used_bytes : 0,
     gpu: typeof data.gpu === "string" ? data.gpu : "",
@@ -682,7 +683,10 @@ export async function updateClusterSettings(
     headers: {
       "Content-Type": "application/json",
     },
-    body: JSON.stringify(settings),
+    // cache_gb null can't say "remove the saved cap" to the server, cache_auto can
+    body: JSON.stringify(
+      settings.cache_gb === null ? { ...settings, cache_auto: true } : settings,
+    ),
   });
   if (!response.ok) {
     const error = await response.text();
@@ -696,7 +700,7 @@ export async function updateClusterSettings(
       typeof data.share_devices === "string" ? data.share_devices : "",
     seeds: typeof data.seeds === "string" ? data.seeds : "",
     placement: data.placement === "greedy" ? "greedy" : "waterfill",
-    cache_gb: typeof data.cache_gb === "number" ? data.cache_gb : 32,
+    cache_gb: typeof data.cache_gb === "number" ? data.cache_gb : null,
     cache_used_bytes:
       typeof data.cache_used_bytes === "number" ? data.cache_used_bytes : 0,
     gpu: typeof data.gpu === "string" ? data.gpu : "",

@@ -1412,13 +1412,17 @@ func onOff(b bool) string {
 }
 
 func printClusterConfig(cfg *api.ClusterConfig) {
+	cacheLimit := "auto"
+	if cfg.CacheGB != nil {
+		cacheLimit = strconv.FormatUint(uint64(*cfg.CacheGB), 10)
+	}
 	values := map[string]string{
 		"enabled":       onOff(cfg.Enabled),
 		"share":         onOff(cfg.Share),
 		"seeds":         cmp.Or(cfg.Seeds, "-"),
 		"share_devices": cmp.Or(cfg.ShareDevices, "all"),
 		"placement":     cfg.Placement,
-		"cache_gb":      fmt.Sprintf("%d (%s used)", cfg.CacheGB, format.HumanBytes2(cfg.CacheUsedBytes)),
+		"cache_gb":      fmt.Sprintf("%s (%s used)", cacheLimit, format.HumanBytes2(cfg.CacheUsedBytes)),
 	}
 	var data [][]string
 	for _, k := range clusterSettingKeys {
@@ -1538,9 +1542,14 @@ func ClusterSetHandler(cmd *cobra.Command, args []string) error {
 	case "placement":
 		req.Placement = &value
 	case "cache-gb":
+		if value == "auto" {
+			auto := true
+			req.CacheAuto = &auto
+			break
+		}
 		n, err := strconv.ParseUint(value, 10, 32)
 		if err != nil {
-			return fmt.Errorf("cache-gb takes a whole number of gigabytes (0 turns the cache off), not %q", value)
+			return fmt.Errorf("cache-gb takes a whole number of gigabytes (0 turns the cache off) or auto, not %q", value)
 		}
 		gb := uint(n)
 		req.CacheGB = &gb

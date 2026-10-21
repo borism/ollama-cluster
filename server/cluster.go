@@ -40,10 +40,11 @@ type clusterRunner struct {
 // clusterRunSettings are the settings that only take effect when the
 // subsystem starts. Placement isn't one: it's read on every model load.
 type clusterRunSettings struct {
-	share   bool
-	seeds   string
-	devices string
-	cacheGB uint
+	share    bool
+	seeds    string
+	devices  string
+	cacheGB  uint
+	cacheSet bool // false: no cap, just the disk floor
 }
 
 func newClusterRunner(ctx context.Context, sched *Scheduler) *clusterRunner {
@@ -62,8 +63,8 @@ func (r *clusterRunner) apply() {
 		share:   envconfig.ClusterShare(true),
 		seeds:   strings.Join(envconfig.ClusterSeeds(), ","),
 		devices: strings.Join(envconfig.ClusterShareDevices(), ","),
-		cacheGB: envconfig.ClusterCacheGB(),
 	}
+	want.cacheGB, want.cacheSet = envconfig.ClusterCacheGB()
 	enabled := envconfig.Cluster()
 	if r.stop != nil && enabled && want == r.running {
 		return
@@ -189,13 +190,17 @@ func currentClusterConfig(ctx context.Context) api.ClusterConfig {
 	for _, d := range localGPUDevices(ctx) {
 		devices = append(devices, api.ClusterDevice{Name: d.Name, Description: d.Description, TotalMemory: d.TotalMemory})
 	}
+	var cacheGB *uint
+	if gb, ok := envconfig.ClusterCacheGB(); ok {
+		cacheGB = &gb
+	}
 	return api.ClusterConfig{
 		Enabled:        envconfig.Cluster(),
 		Share:          envconfig.ClusterShare(true),
 		Seeds:          strings.Join(envconfig.ClusterSeeds(), ","),
 		ShareDevices:   strings.Join(envconfig.ClusterShareDevices(), ","),
 		Placement:      cmp.Or(envconfig.ClusterPlacement(), "waterfill"),
-		CacheGB:        envconfig.ClusterCacheGB(),
+		CacheGB:        cacheGB,
 		CacheUsedBytes: llm.RPCCacheBytes(envconfig.Models()),
 		Sources:        envconfig.ClusterSources(),
 		Devices:        devices,
@@ -254,7 +259,13 @@ func (s *Server) UpdateClusterConfigHandler(c *gin.Context) {
 		}
 		set["cluster_placement"] = *req.Placement
 	}
-	if req.CacheGB != nil {
+	if req.CacheAuto != nil && *req.CacheAuto {
+		if req.CacheGB != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "cache_gb and cache_auto can't both be set"})
+			return
+		}
+		set["cluster_cache_gb"] = nil // UpdateServerConfig removes the key
+	} else if req.CacheGB != nil {
 		set["cluster_cache_gb"] = *req.CacheGB
 	}
 	if len(set) == 0 {

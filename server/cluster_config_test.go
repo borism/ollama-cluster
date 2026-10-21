@@ -138,3 +138,33 @@ func TestFilterSharedDevices(t *testing.T) {
 		t.Errorf("want only CUDA1, got %v", got)
 	}
 }
+
+// cache_gb null in the config means no cap; cache_auto removes a saved one.
+func TestUpdateClusterConfigCacheAuto(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	clusterTestHome(t)
+	s := &Server{}
+	post := func(body api.ClusterConfigRequest) api.ClusterConfig {
+		t.Helper()
+		w := clusterConfigRequest(t, s, "127.0.0.1:40000", body)
+		var got api.ClusterConfig
+		if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &got) != nil {
+			t.Fatalf("status %d, body %s", w.Code, w.Body)
+		}
+		return got
+	}
+	gb, auto := uint(64), true
+
+	if got := currentClusterConfig(context.Background()); got.CacheGB != nil {
+		t.Errorf("default cache_gb = %d, want nil", *got.CacheGB)
+	}
+	if got := post(api.ClusterConfigRequest{CacheGB: &gb}); got.CacheGB == nil || *got.CacheGB != 64 {
+		t.Errorf("after cache_gb=64: %v", got.CacheGB)
+	}
+	if w := clusterConfigRequest(t, s, "127.0.0.1:40000", api.ClusterConfigRequest{CacheGB: &gb, CacheAuto: &auto}); w.Code != http.StatusBadRequest {
+		t.Errorf("cache_gb with cache_auto: status %d, want 400", w.Code)
+	}
+	if got := post(api.ClusterConfigRequest{CacheAuto: &auto}); got.CacheGB != nil || got.Sources["cache_gb"] != "default" {
+		t.Errorf("after cache_auto: %v, source %q; want nil, default", got.CacheGB, got.Sources["cache_gb"])
+	}
+}

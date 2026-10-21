@@ -15,8 +15,8 @@ func TestClusterSettingsPrecedence(t *testing.T) {
 		t.Setenv(k, "")
 	}
 
-	if Cluster() || !ClusterShare(true) || ClusterCacheGB() != 32 || ClusterSources()["enabled"] != "default" {
-		t.Fatalf("defaults: cluster=%v share=%v cache=%d source=%q", Cluster(), ClusterShare(true), ClusterCacheGB(), ClusterSources()["enabled"])
+	if _, set := ClusterCacheGB(); Cluster() || !ClusterShare(true) || set || ClusterSources()["enabled"] != "default" || ClusterSources()["cache_gb"] != "default" {
+		t.Fatalf("defaults: cluster=%v share=%v cache set=%v source=%q", Cluster(), ClusterShare(true), set, ClusterSources()["enabled"])
 	}
 
 	if err := UpdateServerConfig(map[string]any{
@@ -29,10 +29,10 @@ func TestClusterSettingsPrecedence(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if !Cluster() || ClusterShare(true) || ClusterPlacement() != "greedy" || ClusterCacheGB() != 8 ||
+	if gb, set := ClusterCacheGB(); !Cluster() || ClusterShare(true) || ClusterPlacement() != "greedy" || gb != 8 || !set ||
 		len(ClusterSeeds()) != 1 || ClusterSources()["share"] != "config" {
-		t.Errorf("from server.json: cluster=%v share=%v placement=%q cache=%d seeds=%v sources=%v",
-			Cluster(), ClusterShare(true), ClusterPlacement(), ClusterCacheGB(), ClusterSeeds(), ClusterSources())
+		t.Errorf("from server.json: cluster=%v share=%v placement=%q cache=%d,%v seeds=%v sources=%v",
+			Cluster(), ClusterShare(true), ClusterPlacement(), gb, set, ClusterSeeds(), ClusterSources())
 	}
 
 	if d := ClusterShareDevices(); len(d) != 2 || d[0] != "CUDA1" || d[1] != "Vulkan0" || ClusterSources()["share_devices"] != "config" {
@@ -45,8 +45,23 @@ func TestClusterSettingsPrecedence(t *testing.T) {
 
 	t.Setenv("OLLAMA_CLUSTER", "0")
 	t.Setenv("OLLAMA_CLUSTER_CACHE_GB", "64")
-	if Cluster() || ClusterCacheGB() != 64 || ClusterSources()["enabled"] != "env" {
-		t.Errorf("env should win: cluster=%v cache=%d source=%q", Cluster(), ClusterCacheGB(), ClusterSources()["enabled"])
+	if gb, set := ClusterCacheGB(); Cluster() || gb != 64 || !set || ClusterSources()["enabled"] != "env" {
+		t.Errorf("env should win: cluster=%v cache=%d,%v source=%q", Cluster(), gb, set, ClusterSources()["enabled"])
+	}
+
+	// An explicit 0 (cache off) is a set value, not "unset".
+	t.Setenv("OLLAMA_CLUSTER_CACHE_GB", "0")
+	if gb, set := ClusterCacheGB(); gb != 0 || !set {
+		t.Errorf("OLLAMA_CLUSTER_CACHE_GB=0: cache=%d,%v, want 0,true", gb, set)
+	}
+
+	// Removing the key from server.json goes back to unset.
+	t.Setenv("OLLAMA_CLUSTER_CACHE_GB", "")
+	if err := UpdateServerConfig(map[string]any{"cluster_cache_gb": nil}); err != nil {
+		t.Fatal(err)
+	}
+	if _, set := ClusterCacheGB(); set || ClusterSources()["cache_gb"] != "default" {
+		t.Errorf("after removing cluster_cache_gb: set=%v source=%q", set, ClusterSources()["cache_gb"])
 	}
 }
 
