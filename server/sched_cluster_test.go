@@ -58,7 +58,6 @@ func TestLoadedModelsClusterPeers(t *testing.T) {
 	s := InitScheduler(t.Context())
 
 	runner := &runnerRef{
-		model:     &Model{Name: "spilled", ModelPath: "/fake/spilled/model"},
 		modelPath: "/fake/spilled/model",
 		llama: &mockLlm{
 			totalSize:  10 * format.GigaByte,
@@ -70,6 +69,7 @@ func TestLoadedModelsClusterPeers(t *testing.T) {
 		sessionDuration: 10 * time.Millisecond,
 		expiresAt:       time.Now().Add(time.Minute),
 	}
+	runner.model.Store(&Model{Name: "spilled", ModelPath: "/fake/spilled/model"})
 
 	s.loadedMu.Lock()
 	s.loaded["/fake/spilled/model"] = runner
