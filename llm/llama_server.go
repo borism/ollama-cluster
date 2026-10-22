@@ -84,20 +84,36 @@ const (
 // mmprojOffloadHeadroom leaves 1 GiB for backend buffers beyond projector weights.
 const mmprojOffloadHeadroom = 1 << 30
 
-// DefaultEmbeddingNumBatchForContext caps the embedding batch default to the
-// active context length before it is passed to llama-server.
-func DefaultEmbeddingNumBatchForContext(numCtx int) int {
-	if numCtx > 0 {
-		return min(DefaultEmbeddingNumBatch, numCtx)
+// LlamaServerBatch resolves the batch size and extra memory allowance used
+// when deciding whether to load a model alongside other models.
+func LlamaServerBatch(f *gguf.Model, opts api.Options, completion bool) (int, uint64) {
+	batch := opts.NumBatch
+	// These decision heads read the whole prompt without a KV cache, so the
+	// physical batch must hold the entire effective context.
+	wholePrompt := f.KV().Uint("decision.block_count") > 0
+	if wholePrompt {
+		batch = opts.NumCtx
+		if trainCtx := int(f.KV().ContextLength()); trainCtx > 0 {
+			batch = min(batch, trainCtx)
+		}
 	}
-	return DefaultEmbeddingNumBatch
+	if !completion && !wholePrompt {
+		return batch, 0
+	}
+	return batch, LlamaServerBatchMemory(batch)
 }
 
-// WithDefaultEmbeddingNumBatch applies the llama-server embedding batch
-// default to a copy of opts.
-func WithDefaultEmbeddingNumBatch(opts api.Options) api.Options {
-	opts.NumBatch = DefaultEmbeddingNumBatchForContext(opts.NumCtx)
-	return opts
+// LlamaServerBatchMemory is the conservative extra memory allowance for a
+// generation or whole-prompt decision batch above the default batch size.
+func LlamaServerBatchMemory(batch int) uint64 {
+	switch {
+	case batch >= 2048:
+		return 2 << 30
+	case batch >= 1024:
+		return 768 << 20
+	default:
+		return 0
+	}
 }
 
 func boundedNumPredict(numPredict, numCtx int) int {
@@ -178,6 +194,7 @@ type llamaServerLaunchConfig struct {
 	numParallel          int
 	kvCacheType          string
 	embedding            bool
+	decision             bool
 	config               LlamaServerConfig
 	gpus                 []ml.DeviceInfo
 	gpuLibs              []string
@@ -280,7 +297,7 @@ func (s *llamaServerRunner) completionPromptForRequest(ctx context.Context, req 
 		return prompt, nil
 	}
 
-	tokens, err := s.tokenize(ctx, prompt, true, nil)
+	tokens, err := s.tokenize(ctx, prompt, true)
 	if err != nil {
 		return nil, err
 	}
@@ -291,10 +308,7 @@ func (s *llamaServerRunner) completionPromptForRequest(ctx context.Context, req 
 	}
 
 	if !s.launch.config.ContextShift {
-		return nil, api.StatusError{
-			StatusCode:   http.StatusBadRequest,
-			ErrorMessage: "the prompt is longer than the context length currently available to the model; shorten the prompt, adjust the context length in settings, or use a model with a longer context length",
-		}
+		return nil, api.StatusError{StatusCode: http.StatusBadRequest, ErrorMessage: promptTooLongMessage}
 	}
 
 	nKeep := req.Options.NumKeep
@@ -371,7 +385,14 @@ func startLlamaServer(launch llamaServerLaunchConfig, out io.Writer) (cmd *exec.
 		"--no-webui",
 		"--offline",
 		"-c", strconv.Itoa(launch.opts.NumCtx * launch.numParallel),
-		"-np", strconv.Itoa(launch.numParallel),
+	}
+	// The questions of a decision request share their prompt only while they
+	// run in parallel slots. Their prompts rarely repeat across requests, and
+	// at trace verbosity llama-server logs its whole prompt cache after each one.
+	if launch.decision {
+		params = append(params, "-np", "16", "--kv-unified", "--cache-ram", "0")
+	} else {
+		params = append(params, "-np", strconv.Itoa(launch.numParallel))
 	}
 	params = appendLlamaServerLogArgs(params)
 	params = appendJinjaArgs(params, launch.config)
@@ -434,6 +455,12 @@ func startLlamaServer(launch llamaServerLaunchConfig, out io.Writer) (cmd *exec.
 
 	if err = cmd.Start(); err != nil {
 		return nil, 0, err
+	}
+
+	if err = AddRunnerToJob(cmd.Process.Pid); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return nil, 0, fmt.Errorf("assign llama-server to runner job: %w", err)
 	}
 	return cmd, port, nil
 }
@@ -777,18 +804,20 @@ func appendContextShiftArgs(params []string, opts api.Options, enabled bool) []s
 
 const (
 	draftTypeMTP    = "draft-mtp"
-	draftTypeDFlash = "draft-dflash"
+	draftTypeEagle3 = "draft-eagle3"
 )
 
 func appendDraftArgs(params []string, draftType, draftModelPath string, opts api.Options) []string {
-	if draftType == "" {
+	if draftType == "" && draftModelPath == "" {
 		return params
 	}
 	if opts.DraftNumPredict <= 0 {
 		return params
 	}
 
-	params = append(params, "--spec-type", draftType)
+	if draftType != "" {
+		params = append(params, "--spec-type", draftType)
+	}
 	params = append(params, "--spec-draft-n-max", strconv.Itoa(opts.DraftNumPredict))
 	if draftType == draftTypeMTP {
 		params = append(params, "--spec-draft-backend-sampling")
@@ -799,15 +828,18 @@ func appendDraftArgs(params []string, draftType, draftModelPath string, opts api
 	return params
 }
 
-func externalDraftType(path string) (string, error) {
-	f, err := LoadModel(path, 1)
+func externalDraftType(path string, shards ...string) (string, error) {
+	f, err := LoadModel(path, 1, shards...)
 	if err != nil {
 		return "", fmt.Errorf("load draft model metadata: %w", err)
 	}
-	if f.KV().Architecture() == "dflash" {
-		return draftTypeDFlash, nil
+	if hasMTPDraft(f) {
+		return draftTypeMTP, nil
 	}
-	return draftTypeMTP, nil
+	if f.KV().Architecture() == "eagle3" {
+		return draftTypeEagle3, nil
+	}
+	return "", nil
 }
 
 func hasMTPDraft(f *gguf.Model) bool {
@@ -840,6 +872,7 @@ func NewLlamaServerRunner(
 	// Check if this is an embedding model
 	arch := f.KV().Architecture()
 	isEmbedding := f.KV().Has("pooling_type")
+	decisionType := f.KV().String("decision.type")
 
 	// Older Ollama-format GGUFs store vision tensors (v.*, mm.*) inline in
 	// the main model file rather than in a separate projector layer. When
@@ -883,7 +916,7 @@ func NewLlamaServerRunner(
 		draftType = draftTypeMTP
 	}
 	if config.DraftModelPath != "" {
-		draftType, err = externalDraftType(config.DraftModelPath)
+		draftType, err = externalDraftType(config.DraftModelPath, config.DraftModelShardPaths...)
 		if err != nil {
 			return nil, err
 		}
@@ -920,6 +953,7 @@ func NewLlamaServerRunner(
 		numParallel:  numParallel,
 		kvCacheType:  kvCacheType,
 		embedding:    isEmbedding,
+		decision:     decisionType != "",
 		config:       config,
 		gpus:         slices.Clone(gpus),
 		gpuLibs:      slices.Clone(gpuLibs),
@@ -1863,7 +1897,10 @@ func llamaServerStreamLimitError(label string, err error) error {
 }
 
 func (s *llamaServerRunner) statusErrorMessage(body []byte) string {
-	errMsg := strings.TrimSpace(string(body))
+	errMsg := extractLlamaServerErrorMessage(body)
+	if errMsg == "" {
+		errMsg = strings.TrimSpace(string(body))
+	}
 	statusMsg := s.lastErrMsg()
 	if statusMsg == "" {
 		return errMsg
@@ -2419,11 +2456,27 @@ func llamaServerChatResponseFormat(format json.RawMessage) (map[string]any, erro
 	}
 }
 
-func (s *llamaServerRunner) Embedding(ctx context.Context, input string) ([]float32, int, error) {
+func (s *llamaServerRunner) Embedding(ctx context.Context, input string, media [][]byte) ([]float32, int, error) {
 	if err := s.sem.Acquire(ctx, 1); err != nil {
 		return nil, 0, err
 	}
 	defer s.sem.Release(1)
+
+	var prompt any = input
+	if len(media) > 0 {
+		if len(s.launch.projectors) == 0 {
+			return nil, 0, api.StatusError{StatusCode: http.StatusNotImplemented, ErrorMessage: "model does not support media embeddings"}
+		}
+		multimodal := llamaServerMultimodalPrompt{PromptString: input + strings.Repeat(s.llamaServerMediaMarker(), len(media))}
+		for _, m := range media {
+			data, err := llamaServerMediaBytes(m)
+			if err != nil {
+				return nil, 0, api.StatusError{StatusCode: http.StatusBadRequest, ErrorMessage: err.Error()}
+			}
+			multimodal.MultimodalData = append(multimodal.MultimodalData, base64.StdEncoding.EncodeToString(data))
+		}
+		prompt = multimodal
+	}
 
 	status, err := s.getServerStatusRetry(ctx)
 	if err != nil {
@@ -2434,7 +2487,7 @@ func (s *llamaServerRunner) Embedding(ctx context.Context, input string) ([]floa
 
 	// Use "input" field (not "content") to get the OAI-compatible response format
 	// which includes tokens_evaluated for prompt token counting
-	req := map[string]any{"input": input}
+	req := map[string]any{"input": prompt}
 	if s.rawEmbeddings {
 		req["embd_normalize"] = -1
 	}
@@ -2556,6 +2609,8 @@ func extractLlamaServerErrorMessage(body []byte) string {
 	return ""
 }
 
+const promptTooLongMessage = "the prompt is longer than the context length currently available to the model; shorten the prompt, adjust the context length in settings, or use a model with a longer context length"
+
 func isEmbeddingInputLimitError(errMsg string) bool {
 	msg := strings.ToLower(errMsg)
 	return strings.Contains(msg, "too large") ||
@@ -2565,15 +2620,13 @@ func isEmbeddingInputLimitError(errMsg string) bool {
 		strings.Contains(msg, "exceeds the available context")
 }
 
-func (s *llamaServerRunner) tokenize(ctx context.Context, content any, addSpecial bool, parseSpecial *bool) ([]int, error) {
+func (s *llamaServerRunner) tokenize(ctx context.Context, content any, addSpecial bool) ([]int, error) {
 	req := struct {
-		Content      any   `json:"content"`
-		AddSpecial   bool  `json:"add_special,omitempty"`
-		ParseSpecial *bool `json:"parse_special,omitempty"`
+		Content    any  `json:"content"`
+		AddSpecial bool `json:"add_special,omitempty"`
 	}{
-		Content:      content,
-		AddSpecial:   addSpecial,
-		ParseSpecial: parseSpecial,
+		Content:    content,
+		AddSpecial: addSpecial,
 	}
 
 	data, err := json.Marshal(req)
@@ -2614,7 +2667,7 @@ func (s *llamaServerRunner) tokenize(ctx context.Context, content any, addSpecia
 
 // Tokenize calls llama-server's /tokenize endpoint.
 func (s *llamaServerRunner) Tokenize(ctx context.Context, content string) ([]int, error) {
-	return s.tokenize(ctx, content, false, nil)
+	return s.tokenize(ctx, content, false)
 }
 
 // Detokenize calls llama-server's /detokenize endpoint.
