@@ -73,17 +73,18 @@ func ClusterPlacement() string {
 
 // ClusterCacheGB caps the shared RPC worker's tensor cache (weights peers
 // loaded onto this machine, kept so a reload skips the network; see
-// llm/rpc_cache.go). 0 turns the cache off.
-func ClusterCacheGB() uint {
+// llm/rpc_cache.go). 0 turns the cache off. ok is false when no cap is set:
+// the cache then grows until the disk's free-space floor stops it.
+func ClusterCacheGB() (gb uint, ok bool) {
 	if s := Var("OLLAMA_CLUSTER_CACHE_GB"); s != "" {
 		if n, err := strconv.ParseUint(s, 10, 32); err == nil {
-			return uint(n)
+			return uint(n), true
 		}
 	}
 	if v := serverConfigValue(func(c serverConfigData) *uint { return c.ClusterCacheGB }); v != nil {
-		return *v
+		return *v, true
 	}
-	return 32
+	return 0, false
 }
 
 // ClusterSources reports where each cluster setting's value comes from:

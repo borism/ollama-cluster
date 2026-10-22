@@ -47,7 +47,7 @@ describe("Settings defaults", () => {
       share_devices: "",
       seeds: "",
       placement: "waterfill",
-      cache_gb: 32,
+      cache_gb: null,
     });
   });
 

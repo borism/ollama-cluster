@@ -49,7 +49,7 @@ function settings(
     share_devices: "",
     seeds: "",
     placement: "waterfill",
-    cache_gb: 32,
+    cache_gb: null,
     ...overrides,
   };
 }
@@ -248,11 +248,19 @@ describe("ClusterSettings", () => {
     await type("1.5");
     expect(mocks.updateClusterSettings).not.toHaveBeenCalled();
     expect(html(renderer)).toContain("Enter a whole number of GB");
-    expect(input().props.value).toBe("32");
+    expect(input().props.value).toBe("");
 
     await type("64");
     expect(mocks.updateClusterSettings).toHaveBeenCalledWith(
       settings({ enabled: true, cache_gb: 64 }),
+    );
+
+    // Blank goes back to no cap.
+    mocks.updateClusterSettings.mockClear();
+    mocks.updateClusterSettings.mockResolvedValue(settings({ enabled: true }));
+    await type("");
+    expect(mocks.updateClusterSettings).toHaveBeenCalledWith(
+      settings({ enabled: true, cache_gb: null }),
     );
     await act(async () => renderer.unmount());
   });

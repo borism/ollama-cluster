@@ -114,7 +114,7 @@ export default function ClusterSettings() {
 
   const savedCacheGB = settings?.cache_gb;
   useEffect(() => {
-    if (savedCacheGB !== undefined) setCacheInput(String(savedCacheGB));
+    if (savedCacheGB !== undefined) setCacheInput(savedCacheGB?.toString() ?? "");
   }, [savedCacheGB]);
 
   const enabled = settings?.enabled ?? false;
@@ -171,13 +171,15 @@ export default function ClusterSettings() {
 
   const commitCache = () => {
     if (!settings) return;
-    const gb = Number(cacheInput);
-    if (cacheInput.trim() === "" || !Number.isInteger(gb) || gb < 0) {
+    // Blank means no cap.
+    const gb = cacheInput.trim() === "" ? null : Number(cacheInput);
+    if (gb !== null && (!Number.isInteger(gb) || gb < 0)) {
       setError({
         field: "cache_gb",
-        message: "Enter a whole number of GB, or 0 to turn the cache off.",
+        message:
+          "Enter a whole number of GB, 0 to turn the cache off, or leave it blank for no limit.",
       });
-      setCacheInput(String(settings.cache_gb));
+      setCacheInput(settings.cache_gb?.toString() ?? "");
       return;
     }
     if (gb === settings.cache_gb) return;
@@ -349,9 +351,11 @@ export default function ClusterSettings() {
             <div>
               <Label>Tensor cache</Label>
               <Description>
-                Up to this many GB of model weights this computer keeps from
-                peers that used its GPU, so loading the same model again skips
-                the network. The oldest files go first. 0 turns the cache off.
+                Model weights this computer keeps from peers that used its GPU,
+                so loading the same model again skips the network. Blank (the
+                default) lets it use the disk down to a free-space floor of
+                10 GB or 5%, whichever is more; a number caps it at that many
+                GB. The oldest files go first. 0 turns the cache off.
               </Description>
             </div>
           </div>
@@ -362,6 +366,7 @@ export default function ClusterSettings() {
                 aria-label="Tensor cache size in GB"
                 min={0}
                 step={1}
+                placeholder="no limit"
                 value={cacheInput}
                 disabled={!enabled || !settings.share || locked("cache_gb")}
                 onChange={(e) => setCacheInput(e.target.value)}
@@ -371,7 +376,7 @@ export default function ClusterSettings() {
                     e.currentTarget.blur();
                   }
                 }}
-                className="w-16 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none h-6 rounded-lg border border-zinc-950/10 bg-white px-2 py-0 text-sm text-black disabled:opacity-50 dark:border-white/10 dark:bg-neutral-800 dark:text-neutral-100"
+                className="w-20 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none h-6 rounded-lg border border-zinc-950/10 bg-white px-2 py-0 text-sm text-black disabled:opacity-50 dark:border-white/10 dark:bg-neutral-800 dark:text-neutral-100"
               />
               <span className="text-sm text-neutral-500 dark:text-neutral-400">
                 GB

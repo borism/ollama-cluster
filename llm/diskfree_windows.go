@@ -2,15 +2,15 @@ package llm
 
 import "golang.org/x/sys/windows"
 
-// diskFree returns the bytes available to this user on path's volume.
-func diskFree(path string) (uint64, error) {
+// diskFree returns the bytes available to this user on path's volume, and
+// the volume's total size.
+func diskFree(path string) (free, total uint64, err error) {
 	p, err := windows.UTF16PtrFromString(path)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	var free uint64
-	if err := windows.GetDiskFreeSpaceEx(p, &free, nil, nil); err != nil {
-		return 0, err
+	if err := windows.GetDiskFreeSpaceEx(p, &free, &total, nil); err != nil {
+		return 0, 0, err
 	}
-	return free, nil
+	return free, total, nil
 }

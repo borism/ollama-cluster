@@ -91,7 +91,10 @@ func StartRPCWorker(port int, cacheDir string, devices []string) (*RPCWorker, er
 	args = append(args, rpcDeviceArgs(devices)...)
 	// rpc-server.cpp puts its cache in $LLAMA_CACHE + "rpc/" (see below).
 	rpcCache := filepath.Join(cacheDir, "rpc")
-	maxCache := uint64(envconfig.ClusterCacheGB()) << 30
+	maxCache := uint64(rpcCacheUnlimited)
+	if gb, ok := envconfig.ClusterCacheGB(); ok {
+		maxCache = uint64(gb) << 30
+	}
 	if cacheDir != "" && maxCache > 0 {
 		if err := os.MkdirAll(rpcCache, 0o755); err != nil {
 			return nil, fmt.Errorf("create rpc cache dir: %w", err)
@@ -99,7 +102,7 @@ func StartRPCWorker(port int, cacheDir string, devices []string) (*RPCWorker, er
 		if tidyRPCCache(rpcCache, maxCache, time.Now(), diskFree) {
 			args = append(args, "-c")
 		} else {
-			slog.Warn("cluster: under 10 GiB of disk free, sharing without the RPC tensor cache", "dir", rpcCache)
+			slog.Warn("cluster: too little disk free (under max(10 GiB, 5% of the volume)), sharing without the RPC tensor cache", "dir", rpcCache)
 			cacheDir = ""
 		}
 	} else {
@@ -258,7 +261,7 @@ func (w *RPCWorker) tidyCache(dir string, maxBytes uint64) {
 			return
 		case <-t.C:
 			if !tidyRPCCache(dir, maxBytes, time.Now(), diskFree) {
-				slog.Warn("cluster: under 10 GiB of disk free even with the RPC tensor cache emptied", "dir", dir)
+				slog.Warn("cluster: too little disk free (under max(10 GiB, 5% of the volume)) even with the RPC tensor cache emptied", "dir", dir)
 			}
 		}
 	}

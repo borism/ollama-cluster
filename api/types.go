@@ -977,7 +977,9 @@ type ClusterConfig struct {
 	Seeds        string `json:"seeds"`
 	ShareDevices string `json:"share_devices"`
 	Placement    string `json:"placement"`
-	CacheGB      uint   `json:"cache_gb"`
+	// CacheGB caps the tensor cache in GB; 0 turns it off, nil (JSON null)
+	// means no cap beyond keeping enough of the disk free.
+	CacheGB *uint `json:"cache_gb"`
 	// CacheUsedBytes is what the tensor cache holds now. Read-only: POST
 	// ignores it.
 	CacheUsedBytes uint64 `json:"cache_used_bytes"`
@@ -1000,6 +1002,8 @@ type ClusterConfigRequest struct {
 	ShareDevices *string `json:"share_devices,omitempty"`
 	Placement    *string `json:"placement,omitempty"`
 	CacheGB      *uint   `json:"cache_gb,omitempty"`
+	// CacheAuto true removes the CacheGB cap; don't combine it with CacheGB.
+	CacheAuto *bool `json:"cache_auto,omitempty"`
 }
 
 // ClusterPeer is one other ollama-cluster instance seen on the LAN, from

@@ -24,14 +24,24 @@ import (
 // re-hashing it, so that tensor is silently corrupt on every reload.
 // tidyRPCCache works around both from outside until llama.cpp is fixed.
 const (
-	// rpcCacheMinFree is the disk space tidyRPCCache keeps free, deleting
-	// cache files if it has to, and below which the worker runs uncached.
-	rpcCacheMinFree = 10 << 30
+	// The disk space tidyRPCCache keeps free, deleting cache files if it has
+	// to, and below which the worker runs uncached, is the larger of
+	// rpcCacheMinFree and 1/rpcCacheMinFreeDiv of the volume (5%), so big
+	// disks keep proportionally more headroom for models and the OS.
+	rpcCacheMinFree    = 10 << 30
+	rpcCacheMinFreeDiv = 20
+	// rpcCacheUnlimited as the size cap means no cap beyond the free-space
+	// floor (OLLAMA_CLUSTER_CACHE_GB unset).
+	rpcCacheUnlimited = math.MaxUint64
+	// rpcCacheFallbackBytes caps an unlimited cache for a pass whose
+	// free-space reading failed, so it can't grow with no brake.
+	rpcCacheFallbackBytes = 32 << 30
 	// rpcCacheSettle: files written more recently than this may still be
 	// mid-write, so their hash is checked on a later pass.
 	rpcCacheSettle = time.Minute
 	// rpcCacheTidyInterval is how often a running worker's cache is tidied.
-	rpcCacheTidyInterval = 5 * time.Minute
+	// It's also how long a big download can outrun the floor.
+	rpcCacheTidyInterval = time.Minute
 	// rpcCacheCheckedMarker's modification time records how far hash checks
 	// have got, so a restart only re-checks files written since.
 	rpcCacheCheckedMarker = "checked-until"
@@ -40,14 +50,16 @@ const (
 var rpcCacheFileName = regexp.MustCompile(`^[0-9a-f]{16}$`)
 
 // tidyRPCCache deletes cache files in dir whose contents don't match their
-// name, then the oldest files until the cache is at most maxBytes and the
-// disk has rpcCacheMinFree left. It reports whether that much is free
-// afterwards, i.e. whether there's room to keep caching.
+// name, then the oldest files until the cache is at most maxBytes
+// (rpcCacheUnlimited for no cap) and the disk has its free-space floor left.
+// It reports whether that much is free afterwards, i.e. whether there's room
+// to keep caching. If the free space can't be read, an explicit cap is all
+// that applies, and an unlimited one becomes rpcCacheFallbackBytes.
 //
 // ponytail: "oldest" is by write time -- llama.cpp never touches a file it
 // serves, so there's no last-used time to go by. A true LRU needs the
 // llama.cpp side to record hits.
-func tidyRPCCache(dir string, maxBytes uint64, now time.Time, diskFree func(string) (uint64, error)) bool {
+func tidyRPCCache(dir string, maxBytes uint64, now time.Time, diskFree func(string) (free, total uint64, err error)) bool {
 	entries, err := os.ReadDir(dir)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		slog.Warn("cluster: can't read RPC cache", "dir", dir, "error", err)
@@ -92,20 +104,29 @@ func tidyRPCCache(dir string, maxBytes uint64, now time.Time, diskFree func(stri
 		}
 	}
 
-	free := func() uint64 {
-		n, err := diskFree(dir)
+	// stat reads the free space and the floor to keep free; ok is false if
+	// the free space is unknown, which never counts as too little.
+	stat := func() (free, floor uint64, ok bool) {
+		free, total, err := diskFree(dir)
 		if err != nil {
-			return math.MaxUint64 // unknown: don't delete for space
+			return math.MaxUint64, rpcCacheMinFree, false
 		}
-		return n
+		return free, max(rpcCacheMinFree, total/rpcCacheMinFreeDiv), true
+	}
+	if _, _, ok := stat(); !ok && maxBytes == rpcCacheUnlimited {
+		maxBytes = rpcCacheFallbackBytes
 	}
 	slices.SortFunc(files, func(a, b cacheFile) int { return a.written.Compare(b.written) })
-	for len(files) > 0 && (total > maxBytes || free() < rpcCacheMinFree) {
+	for len(files) > 0 {
+		if free, floor, _ := stat(); total <= maxBytes && free >= floor {
+			break
+		}
 		os.Remove(files[0].path)
 		total -= files[0].size
 		files = files[1:]
 	}
-	return free() >= rpcCacheMinFree
+	free, floor, _ := stat()
+	return free >= floor
 }
 
 // RPCCacheBytes is how much the RPC worker's tensor cache holds, given the

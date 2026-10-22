@@ -108,7 +108,7 @@ export async function applySettingsDefaults({
       currentClusterSettings.share_devices !== "" ||
       currentClusterSettings.seeds !== "" ||
       currentClusterSettings.placement !== "waterfill" ||
-      currentClusterSettings.cache_gb !== 32);
+      currentClusterSettings.cache_gb !== null);
   const rollbacks: Array<() => Promise<unknown>> = [];
 
   try {
@@ -124,7 +124,7 @@ export async function applySettingsDefaults({
         share_devices: "",
         seeds: "",
         placement: "waterfill",
-        cache_gb: 32, // OLLAMA_CLUSTER_CACHE_GB's default
+        cache_gb: null, // OLLAMA_CLUSTER_CACHE_GB unset: no cap
       });
       rollbacks.push(() => updateCluster(currentClusterSettings));
     }
