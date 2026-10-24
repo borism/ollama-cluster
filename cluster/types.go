@@ -9,6 +9,7 @@
 package cluster
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/borism/ollama-cluster/ml"
@@ -48,6 +49,11 @@ type Peer struct {
 	ProtoMajor int
 	ProtoMinor int
 
+	// Version is the peer's ollama-cluster build version, for telling the
+	// user what to install when ProtoIncompatibility is set. Empty for
+	// builds that predate the field.
+	Version string
+
 	// Load is a coarse 0..1 self-reported utilization, a secondary signal
 	// alongside Devices[].FreeMemory to avoid preferring a peer that is
 	// technically not full but is busy.
@@ -69,6 +75,21 @@ type Peer struct {
 
 	// LastSeen is when we last heard this peer's beacon.
 	LastSeen time.Time
+}
+
+// ProtoIncompatibility returns "" if this peer's RPC protocol can pair with
+// ours, else why not and which side to upgrade. Discovery keeps such peers
+// so they can be shown; placement never schedules them (usablePeer).
+func (p Peer) ProtoIncompatibility() string {
+	if p.ProtoMajor == RPCProtoMajor && p.ProtoMinor <= RPCProtoMinor {
+		return ""
+	}
+	fix := "upgrade the peer to match"
+	if p.ProtoMajor > RPCProtoMajor || (p.ProtoMajor == RPCProtoMajor && p.ProtoMinor > RPCProtoMinor) {
+		fix = "upgrade this node to match"
+	}
+	return fmt.Sprintf("speaks RPC protocol %d.%d, this node needs %d.%d: %s",
+		p.ProtoMajor, p.ProtoMinor, RPCProtoMajor, RPCProtoMinor, fix)
 }
 
 // Stale reports whether this peer hasn't been heard from recently enough to
