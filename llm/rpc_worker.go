@@ -102,7 +102,7 @@ func StartRPCWorker(port int, cacheDir string, devices []string) (*RPCWorker, er
 		if tidyRPCCache(rpcCache, maxCache, time.Now(), diskFree) {
 			args = append(args, "-c")
 		} else {
-			slog.Warn("cluster: too little disk free (under max(10 GiB, 5% of the volume)), sharing without the RPC tensor cache", "dir", rpcCache)
+			slog.Warn("cluster: too little disk free (under 10-15 GiB, depending on the volume size), sharing without the RPC tensor cache", "dir", rpcCache)
 			cacheDir = ""
 		}
 	} else {
@@ -261,7 +261,7 @@ func (w *RPCWorker) tidyCache(dir string, maxBytes uint64) {
 			return
 		case <-t.C:
 			if !tidyRPCCache(dir, maxBytes, time.Now(), diskFree) {
-				slog.Warn("cluster: too little disk free (under max(10 GiB, 5% of the volume)) even with the RPC tensor cache emptied", "dir", dir)
+				slog.Warn("cluster: too little disk free (under 10-15 GiB, depending on the volume size) even with the RPC tensor cache emptied", "dir", dir)
 			}
 		}
 	}
