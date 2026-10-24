@@ -459,6 +459,10 @@ jobs:
         if: ${{ startsWith(matrix.os, 'ubuntu') }}
         run: git diff --exit-code -- app/ui/app/codegen/gotypes.gen.ts
 
+      - name: Verify RPC protocol version matches LLAMA_CPP_VERSION
+        if: ${{ startsWith(matrix.os, 'ubuntu') }}
+        run: git diff --exit-code -- cluster/rpcproto_gen.go
+
       - name: go test
         if: always()
         # Smoke-run each benchmark once to catch panics and bit rot; this does

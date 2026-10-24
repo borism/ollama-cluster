@@ -15,7 +15,7 @@ import (
 	"github.com/borism/ollama-cluster/ml"
 )
 
-// RPCProtoMajor/RPCProtoMinor are defined in discovery.go.
+// RPCProtoMajor/RPCProtoMinor are defined in rpcproto_gen.go.
 
 // minUsefulMemory: a peer with less spare memory than this isn't worth
 // an RPC hop for.
