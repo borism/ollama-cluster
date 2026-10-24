@@ -901,7 +901,7 @@ func (s *Server) systemOneLlamaServer(c *gin.Context, m *Model, req decision.Req
 		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("model %q is not a llama.cpp decision model", req.Model)})
 		return
 	}
-	if err := decision.ValidateLimits(req); err != nil {
+	if err := decision.ValidateLimits(req, decisionType); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -1946,6 +1946,9 @@ func GetModelInfo(req api.ShowRequest) (*api.ShowResponse, error) {
 	resp.TemplateSource = m.templateSource()
 	if !slices.Contains(resp.Capabilities, model.CapabilityDecision) {
 		resp.Thinking = m.Thinking()
+	}
+	if slices.Contains(resp.Capabilities, model.CapabilitySpeech) {
+		resp.Voices = speechVoices(mf)
 	}
 
 	if summaries, err := manifestSummariesForShow(name, mf.SelectedDigest()); err != nil {
