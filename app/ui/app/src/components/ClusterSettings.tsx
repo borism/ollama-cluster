@@ -370,9 +370,9 @@ export default function ClusterSettings() {
               <Description>
                 Model weights this computer keeps from peers that used its GPU,
                 so loading the same model again skips the network. Blank (the
-                default) lets it use the disk down to a free-space floor of 10
-                GB or 5%, whichever is more; a number caps it at that many GB.
-                The oldest files go first. 0 turns the cache off.
+                default) lets it use the disk down to a free-space floor of
+                10 to 15 GB (5% of the disk, within that range); a number caps it at that many
+                GB. The oldest files go first. 0 turns the cache off.
               </Description>
             </div>
           </div>
