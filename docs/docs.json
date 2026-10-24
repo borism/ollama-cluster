@@ -150,6 +150,7 @@
               "/gpu",
               "/cluster",
               "/cluster-benchmarks",
+              "/comparison",
               "/troubleshooting"
             ]
           }

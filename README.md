@@ -85,10 +85,13 @@ numbers and open questions.
 See [`docs/cluster.mdx`](docs/cluster.mdx) for environment variables,
 per-request overrides, and current limitations.
 
+See [`docs/comparison.mdx`](docs/comparison.mdx) for how it compares with
+similar projects.
+
 ## Download
 
-**[v0.40.3-cluster.1](https://github.com/borism/ollama-cluster/releases/tag/v0.40.3-cluster.1)**
-is the latest release, based on upstream Ollama v0.40.3 (llama.cpp b11351).
+**[Latest release](https://github.com/borism/ollama-cluster/releases/latest)**
+(the release page names its upstream Ollama base and llama.cpp version).
 Versions are `v<upstream Ollama version>-cluster.<N>`, with N restarting at 1
 on each new upstream base. `scripts/install.sh` pulls from this fork's own
 [GitHub Releases](https://github.com/borism/ollama-cluster/releases) (not

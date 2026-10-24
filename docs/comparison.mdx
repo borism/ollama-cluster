@@ -1,0 +1,154 @@
+---
+title: Comparison with similar projects
+---
+
+This page compares ollama-cluster with other open-source projects that spread
+one language model over several machines. It is meant for someone choosing a
+tool. It describes what each project is documented to do; it is not a
+ranking.
+
+Data date: 2026-10-24. Facts about ollama-cluster come from this repository
+(the README, [Cluster](/cluster), [Cluster benchmarks](/cluster-benchmarks),
+`docs/releasing.md` and the code). Facts about the other projects come from
+their own repositories and documentation, linked in [Sources](#sources). Where
+a point could not be found there, the table says "not documented", which
+means only that it was not found in the pages that were read.
+
+Row order in every table: ollama-cluster first, exo second, then the rest by
+prominence, using GitHub star count as the measure (highest first) and
+showing the last push date in the maturity table so that recent activity can
+be judged separately.
+
+## At a glance
+
+| Project | What it is | Engine | How the model is split | Hardware and OS |
+|---|---|---|---|---|
+| [ollama-cluster](https://github.com/borism/ollama-cluster) | A fork of Ollama with an opt-in cluster mode for machines on one LAN | llama.cpp, using its RPC backend | By layers: layers that do not fit locally spill onto peers' free GPU memory | Linux (amd64 and arm64) with CUDA 12 and 13, Vulkan, ROCm, JetPack; macOS with Metal, and Vulkan through MoltenVK on Intel Macs with an AMD GPU; no Windows build |
+| [exo](https://github.com/exo-explore/exo) | Software that joins devices into one cluster, with a dashboard | MLX, with MLX distributed for communication | Pipeline and tensor sharding, chosen from the device topology; RDMA over Thunderbolt 5 on macOS 26.2 or later | Apple Silicon Macs use the GPU; on Linux the README says it currently runs on CPU |
+| [llama.cpp RPC](https://github.com/ggml-org/llama.cpp/blob/master/tools/rpc/README.md) | The RPC backend and `ggml-rpc-server` inside llama.cpp | ggml | By default weights and KV cache are spread over local and remote devices in proportion to available memory; `--tensor-split` overrides | Any backend built with RPC enabled; the README marks RPC as proof-of-concept |
+| [vLLM](https://github.com/vllm-project/vllm) with [Ray](https://github.com/ray-project/ray) | An inference server (vLLM) that uses Ray as its multi-node runtime | vLLM | Tensor parallel inside a node, pipeline parallel across nodes; data, expert and context parallel also documented | NVIDIA, AMD and Intel GPUs, x86, ARM and PowerPC CPUs, and plugins for other accelerators |
+| [LocalAI](https://github.com/mudler/LocalAI) | A self-hosted model server that wraps several engines | llama.cpp, vLLM, MLX and others, one image per backend | Three modes: federated (a whole request goes to one node), worker (weights sharded over llama.cpp RPC workers) and a PostgreSQL plus NATS distributed mode | NVIDIA, AMD, Intel, Apple Silicon, Vulkan or CPU-only |
+| [Petals](https://github.com/bigscience-workshop/petals) | A peer-to-peer swarm where each server holds some blocks of a model | PyTorch and Transformers | Blocks (layers) of the model are served by different peers | NVIDIA GPUs (AMD through a wiki page); Linux, Windows through WSL, macOS on Apple Silicon |
+| [GPUStack](https://github.com/gpustack/gpustack) | A GPU cluster manager that deploys and routes to inference engines | vLLM, SGLang, TensorRT-LLM or a custom engine | Left to the engine; the README does not describe the split | Worker nodes are Linux only; NVIDIA, AMD and several other accelerators |
+| [llm-d](https://github.com/llm-d/llm-d) | A Kubernetes serving stack that sits above model servers | vLLM or SGLang | Routing across replicas, prefill/decode disaggregation, wide expert parallelism | Kubernetes clusters; the README says most accelerators |
+| [Mesh-LLM](https://github.com/Mesh-LLM/mesh-llm) | A mesh of nodes behind one OpenAI-style endpoint | Skippy, built on a patched llama.cpp runtime | A model that fits on one node runs there; larger dense models are cut into contiguous layer ranges (stages) on several nodes | macOS; Linux with CPU, CUDA, ROCm or Vulkan; Windows with CPU, CUDA, ROCm or Vulkan |
+| [distributed-llama](https://github.com/b4rtaz/distributed-llama) | A C++ engine with a root node and worker nodes | Its own engine | Tensor parallelism; node count must be a power of two and at most the model's KV head count | CPU on Linux, macOS and Windows (ARM and x86-64 AVX2); experimental Vulkan |
+| [Parallax](https://github.com/GradientHQ/parallax) | A scheduler plus nodes that serve a model together | SGLang or vLLM on GPUs, MLX LM on Macs | Pipeline-parallel sharding | Linux and macOS from source, a Windows app; Docker on Linux |
+| [prima.cpp](https://github.com/OpenCPIL/prima.cpp) | A distributed fork of llama.cpp for small home clusters | llama.cpp fork | Layers over a ring of devices, with weights read by mmap and prefetched from disk | macOS, Linux, Android and HarmonyOS (through Termux); Windows listed as future work |
+| [Ghostlink](https://github.com/rwilliamspbg-ops/Ghostlink) | A Rust program that finds LAN peers, splits a GGUF model over ggml-rpc and serves an API | llama.cpp (ggml-rpc and a native llama.cpp backend) | Model weights over ggml-rpc workers, placed by detected hardware | Windows, Linux, macOS; CPU, GPU and NPU |
+| [dnet](https://github.com/firstbatchxyz/dnet) | A distributed inference project for Apple Silicon | MLX | Pipelined ring over layers; tensor parallelism is listed as in progress | Apple Silicon only |
+
+## Networking and operation
+
+Discovery, topology and failure handling:
+
+| Project | Discovery | Topology and scale | Failure handling |
+|---|---|---|---|
+| ollama-cluster | A UDP broadcast beacon on the LAN; optional unicast seeds for other subnets | Hub and spoke on a LAN: one head per request, no worker-to-worker traffic; the docs describe it as aimed at a handful of machines | Unreachable peers are skipped before load; a load is retried once without a peer that drops; a sharing machine restarts its RPC worker with backoff; loss of a peer in the middle of a request is not documented |
+| exo | Automatic; the source shows IPv6 multicast hellos plus Zenoh; a namespace setting separates clusters on one network | Local network; RDMA needs every device connected to every other over Thunderbolt 5 | A master is elected, re-announces on a heartbeat and is re-elected after a silence timeout; effect on a running request is not documented |
+| llama.cpp RPC | None; the head is given a list of worker addresses | One head and N workers over TCP, with RDMA negotiated where available | Not documented in the RPC README |
+| vLLM with Ray | Nodes are started against the Ray head node's address | Multi-node GPU clusters; the security page says to use an isolated network | The vLLM page says Ray's higher-level APIs add fault tolerance; vLLM's own handling was not documented on the pages read |
+| LocalAI | P2P: a shared token over libp2p, with DHT or mDNS-only; or a fixed worker list; distributed mode: workers register with a frontend | P2P for ad-hoc groups including a public swarm list; PostgreSQL plus NATS for horizontal scaling, with Docker Compose and Kubernetes | Distributed mode: heartbeats, nodes marked offline after a configurable threshold (default 5 minutes), load jobs with leases; P2P mode: not documented |
+| Petals | Peer-to-peer swarm; mechanism not documented in the README | Public swarm over the internet, or a swarm you host yourself | Not documented in the README |
+| GPUStack | Workers join a server with a token | Multiple clusters: on-premises, Kubernetes and cloud | The README lists automated failure recovery; details were not read |
+| llm-d | Not documented in the README (it deploys onto Kubernetes) | Kubernetes in a datacenter | The README's release notes mention active-active high availability and transport resilience |
+| Mesh-LLM | Invite tokens for invite-only meshes; Nostr for published meshes; QUIC with relays | Invite-only or public meshes over the internet, or a LAN | With a locked split topology, losing a stage makes the topology unavailable after a grace period; otherwise not documented |
+| distributed-llama | None; the root node is given worker addresses | Nodes on one switch or router | Not documented |
+| Parallax | A scheduler that nodes join with `parallax join`; a public relay is used in remote mode and sees the scheduler's and nodes' IP addresses | Local network or remote nodes | Not documented |
+| prima.cpp | None; each device is started with its rank and its neighbour's address | A ring of devices on one local network | Not documented |
+| Ghostlink | UDP broadcast and mDNS discovery, per the README's file layout | LAN | A supervisor watches the RPC server; if a worker crashes its advertisement is withdrawn and active requests fail or drain |
+| dnet | The README says nodes find each other; mechanism not documented there | Apple Silicon devices, with Thunderbolt detected | Not documented |
+
+Caching, API and security:
+
+| Project | Caching | API | Security model |
+|---|---|---|---|
+| ollama-cluster | Sharing machines keep a persistent tensor cache on disk, so reloading the same model skips the network; size is capped by a setting and a free-disk floor | The Ollama API, plus the OpenAI and Anthropic compatibility endpoints Ollama documents | Trusted LAN or VPN only: RPC is unauthenticated and the discovery code has no signing or shared secret; cluster settings can only be changed from the local machine |
+| exo | Not documented; models are downloaded to local model directories | OpenAI Chat Completions, OpenAI Responses, Claude Messages and Ollama APIs | Not documented; a namespace isolates clusters but is not described as authentication |
+| llama.cpp RPC | Optional local cache on the worker (`-c`) | None in the RPC README; `llama-server` provides an OpenAI-compatible server | Documented as insecure: do not run on an open network |
+| vLLM with Ray | Not applicable; each node needs the model files and an identical environment | OpenAI-compatible, Anthropic Messages and gRPC | Inter-node traffic is documented as insecure by default and meant for an isolated network; Ray has its own security documentation including token authentication |
+| LocalAI | Distributed mode stages model files to workers or uses a shared directory; P2P mode: not documented | OpenAI, Anthropic and ElevenLabs APIs | A shared token for P2P; registration token, API keys and PostgreSQL-backed auth for distributed mode |
+| Petals | Not documented in the README | A Python client; an HTTP and WebSocket endpoint exists in a separate chat app repository | Public swarm: data is processed by other participants, so the README suggests hosting your own swarm for sensitive data |
+| GPUStack | Not documented in the README | The README says industry-standard APIs for LLM, voice, image and video | Built-in user authentication and access control; workers join with a token |
+| llm-d | Tiered KV-cache offload to CPU memory or disk | OpenAI-compatible batch API; serving APIs come from the model server | Not documented in the README |
+| Mesh-LLM | Peers fetch only the layer-package pieces for their assigned stage | OpenAI-compatible | QUIC encrypts traffic between nodes, including split activations; owner trust policy and invite tokens |
+| distributed-llama | The root node loads the model and forwards weights to workers | A `/v1/chat/completions` endpoint in `dllama-api` | Not documented |
+| Parallax | Not documented | OpenAI-compatible module in the source | Not documented beyond the relay note above |
+| prima.cpp | Weights are memory-mapped and prefetched from disk | A chat completion API through `llama-server` on rank 0 | Not documented |
+| Ghostlink | Not documented beyond a tuning cache | OpenAI-compatible, with bearer API keys | Scoped API keys, HMAC-authenticated discovery, a shared secret for RPC admission; the README states the RPC byte stream itself is unencrypted |
+| dnet | Not documented | OpenAI-compatible `/v1/chat/completions` | Not documented |
+
+## Maturity
+
+Star counts, last push and license were read from the GitHub API on
+2026-10-24. "Last push" is the most recent push to any branch, so it can be
+later than the latest release. A project with no GitHub release is shown as
+"none".
+
+| Project | Latest GitHub release | Last push | Stars | License |
+|---|---|---|---|---|
+| ollama-cluster | v0.40.8-cluster.1 (2026-10-23) | 2026-10-24 | 1 | MIT |
+| exo | v1.0.71 (2026-04-23) | 2026-10-13 | 48,029 | Apache-2.0 |
+| llama.cpp | Rolling build tags such as b11860 (2026-10-24), marked pre-release; the release marked Latest is v0.7.0 (2026-10-15) | 2026-10-24 | 132,235 | MIT |
+| vLLM / Ray | vLLM v0.32.0 (2026-10-18) / Ray ray-2.59.0 (2026-10-02) | 2026-10-24 / 2026-10-24 | 95,324 / 44,115 | Apache-2.0 / Apache-2.0 |
+| LocalAI | v4.12.1 (2026-10-23) | 2026-10-24 | 49,922 | MIT |
+| Petals | v2.2.0 (2023-09-06) | 2024-09-07 | 10,662 | MIT |
+| GPUStack | v2.3.0 (2026-10-23) | 2026-10-23 | 5,885 | Apache-2.0 |
+| llm-d | v1.0.0 (2026-10-20) | 2026-10-24 | 5,003 | Apache-2.0 |
+| Mesh-LLM | v0.78.1 (2026-10-05) | 2026-10-24 | 3,551 | Apache-2.0 |
+| distributed-llama | v0.16.5 (2026-02-02) | 2026-10-14 | 3,115 | MIT |
+| Parallax | v0.1.2 (2025-12-02) | 2026-07-01 | 1,407 | Apache-2.0 |
+| prima.cpp | none | 2026-09-06 | 115 | MIT |
+| Ghostlink | v2.5.0 (2026-10-16) | 2026-10-24 | 84 | MIT |
+| dnet | v0.0.1-alpha (2025-11-30) | 2026-01-06 | 76 | Apache-2.0 |
+
+## How to choose
+
+- **A few mixed machines on one LAN, and you already use Ollama.** ollama-cluster keeps the Ollama CLI and API and adds peers with one setting per machine. It splits by layers, so it lets a model that is too big for one machine run; it does not speed up a model that already fits on one machine.
+- **Several Apple Silicon Macs, especially with Thunderbolt 5.** exo is built around MLX and documents RDMA over Thunderbolt 5 and tensor parallelism for speed-ups on that hardware. ollama-cluster can also use RDMA between Thunderbolt 5 Macs through llama.cpp.
+- **Full manual control of a llama.cpp split.** llama.cpp RPC gives the flags directly (`--rpc`, `--tensor-split`), with no discovery layer.
+- **A GPU server room or Kubernetes.** vLLM with Ray, llm-d and GPUStack target datacenter-style clusters with fast interconnects and schedulers.
+- **A shared service with several engines and users.** LocalAI covers several engines and modalities, with P2P and database-backed distributed modes.
+- **Pooling machines across the internet.** Petals and Mesh-LLM are designed for swarms or meshes that include machines outside your network. Read their privacy notes first.
+- **Small CPU devices.** distributed-llama has a Raspberry Pi guide, and prima.cpp lists laptops, phones and tablets among its devices.
+- **Other options in this area.** Parallax, Ghostlink and dnet have far fewer stars than the rest; check their own status notes before relying on them.
+
+## Where ollama-cluster differs
+
+Only points that were checked in both places are listed.
+
+- It lives inside Ollama: pull, run and the API are unchanged, and cluster mode is a setting on each machine. Several of the others are separate servers or engines.
+- Its peers can use different GPU backends (CUDA, Vulkan, ROCm, Metal) under one model, because llama.cpp RPC moves tensors rather than driver code. exo's stated GPU target is Apple Silicon through MLX; vLLM and GPUStack document multi-node setups of GPU servers.
+- Sharing is opt-in per machine and per GPU, and placement uses each peer's reported free memory, load and measured latency.
+- It is hub and spoke. A head talks to each worker and workers do not talk to each other. The README and [Cluster](/cluster) call this a ceiling for large node counts, and it does not provide tensor-parallel speed-ups for a model that already fits on one machine.
+- Workers keep a persistent tensor cache. llama.cpp RPC has the same cache as an option; ollama-cluster sizes and prunes it.
+- Its security model is that of llama.cpp RPC: trusted LAN or VPN only. Among the projects above, Mesh-LLM and Ghostlink document encrypted or authenticated peer links or discovery, and LocalAI and GPUStack document token-based joining.
+- It has no Windows build and no Docker image of its own yet, and cluster mode is labelled experimental.
+
+## Limits of this comparison
+
+- The data date is 2026-10-24. These projects change quickly; check the linked sources.
+- None of the other projects were installed, run or tested for this page. Everything about them is taken from their own README, documentation and source files, and describes what the project says it does.
+- "Not documented" means not found in the pages that were read, not that the feature is absent.
+- Benchmark numbers are not comparable across projects: models, quantisation, hardware, links and methods differ. No numbers from other projects are given here. ollama-cluster's own runs are in [Cluster benchmarks](/cluster-benchmarks). Of the others, exo, llm-d, GPUStack, Petals, prima.cpp and Ghostlink show performance figures in their READMEs or linked pages.
+- Star count is a rough proxy for prominence and says nothing about fit. The list is not exhaustive: a search on the same date found other small projects (for example mycellm, 8 stars) but none that was both comparable and verifiable enough to add.
+
+## Sources
+
+Read on 2026-10-24.
+
+- ollama-cluster: [README](https://github.com/borism/ollama-cluster/blob/main/README.md), [Cluster](/cluster), [Cluster benchmarks](/cluster-benchmarks), [releasing notes](https://github.com/borism/ollama-cluster/blob/main/docs/releasing.md), the `cluster` package, and the [latest release](https://github.com/borism/ollama-cluster/releases/latest).
+- exo: [README](https://github.com/exo-explore/exo/blob/main/README.md), [platform tiers](https://github.com/exo-explore/exo/blob/main/PLATFORMS.md), [discovery source](https://github.com/exo-explore/exo/blob/main/rust/networking/src/discovery.rs), [election source](https://github.com/exo-explore/exo/blob/main/src/exo/shared/election.py).
+- llama.cpp RPC: [RPC README](https://github.com/ggml-org/llama.cpp/blob/master/tools/rpc/README.md), [llama.cpp README](https://github.com/ggml-org/llama.cpp/blob/master/README.md), [releases](https://github.com/ggml-org/llama.cpp/releases).
+- vLLM and Ray: [parallelism and scaling](https://github.com/vllm-project/vllm/blob/main/docs/serving/parallelism_scaling.md), [vLLM security](https://github.com/vllm-project/vllm/blob/main/docs/usage/security.md), [vLLM README](https://github.com/vllm-project/vllm/blob/main/README.md), [Ray security](https://github.com/ray-project/ray/blob/master/doc/source/ray-security/index.md).
+- LocalAI: [P2P and federated inference](https://github.com/mudler/LocalAI/blob/master/docs/content/features/distributed_inferencing.md), [distributed mode](https://github.com/mudler/LocalAI/blob/master/docs/content/features/distributed-mode.md), [README](https://github.com/mudler/LocalAI/blob/master/README.md).
+- Petals: [README](https://github.com/bigscience-workshop/petals/blob/main/README.md).
+- GPUStack: [README](https://github.com/gpustack/gpustack/blob/main/README.md) and [migration notes](https://github.com/gpustack/gpustack/blob/main/docs/migration.md), which say that the llama-box backend was dropped in v2.0.0, that llama.cpp is available as a custom backend, and that distributed inference across workers is not supported with custom backends.
+- llm-d: [README](https://github.com/llm-d/llm-d/blob/main/README.md).
+- Mesh-LLM: [README](https://github.com/Mesh-LLM/mesh-llm/blob/main/README.md), [split serving](https://github.com/Mesh-LLM/mesh-llm/blob/main/skippy/docs/SKIPPY_SPLITS.md), [meshes](https://github.com/Mesh-LLM/mesh-llm/blob/main/mesh/docs/MESHES.md).
+- distributed-llama: [README](https://github.com/b4rtaz/distributed-llama/blob/main/README.md), [GPU guide](https://github.com/b4rtaz/distributed-llama/blob/main/docs/HOW_TO_RUN_GPU.md), [API server source](https://github.com/b4rtaz/distributed-llama/blob/main/src/dllama-api.cpp).
+- Parallax: [README](https://github.com/GradientHQ/parallax/blob/main/README.md), [install](https://github.com/GradientHQ/parallax/blob/main/docs/user_guide/install.md), [quick start](https://github.com/GradientHQ/parallax/blob/main/docs/user_guide/quick_start.md), [OpenAI-compatible module](https://github.com/GradientHQ/parallax/blob/main/src/backend/server/openai_compat.py).
+- prima.cpp: [README](https://github.com/OpenCPIL/prima.cpp/blob/main/README.md).
+- Ghostlink: [README](https://github.com/rwilliamspbg-ops/Ghostlink/blob/main/README.md).
+- dnet: [README](https://github.com/firstbatchxyz/dnet/blob/master/README.md).
+- Counts and dates: the GitHub API pages for each repository, for example [ggml-org/llama.cpp](https://api.github.com/repos/ggml-org/llama.cpp).
