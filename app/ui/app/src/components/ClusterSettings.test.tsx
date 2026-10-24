@@ -281,6 +281,48 @@ describe("ClusterSettings", () => {
     await act(async () => renderer.unmount());
   });
 
+  it("flags a peer with an incompatible RPC protocol and says what to upgrade", async () => {
+    mocks.getClusterSettings.mockResolvedValue(settings({ enabled: true }));
+    const peer = {
+      id: "9f3a1c7e2b804d61",
+      addr: "10.0.0.2:11435",
+      sharing: true,
+      devices: [],
+      load: 0,
+      last_seen: new Date().toISOString(),
+    };
+    mocks.getClusterPeers.mockResolvedValue(
+      peersResponse({
+        peers: [
+          {
+            ...peer,
+            compatible: false,
+            reason:
+              "speaks RPC protocol 7.0, this node needs 8.0: upgrade the peer to match",
+          },
+          {
+            ...peer,
+            id: "0c88e4a1f5d23b90",
+            addr: "10.0.0.3:11435",
+            compatible: false,
+            reason: "speaks RPC protocol 9.0, this node needs 8.0",
+            version: "0.40.8-cluster.1",
+          },
+          { ...peer, id: "old-server-peer", addr: "10.0.0.4:11435" },
+        ],
+      }),
+    );
+    const renderer = await renderCluster();
+    const out = html(renderer);
+    expect(out).toContain("upgrade the peer to match");
+    expect(out).toContain("peer version unknown");
+    expect(out).toContain("0.40.8-cluster.1");
+    // Only the two flagged peers get the notice; a peer without the field
+    // (older server) is treated as compatible.
+    expect(out.split("Not used:").length - 1).toBe(2);
+    await act(async () => renderer.unmount());
+  });
+
   it("shows latency only when it has been measured", async () => {
     mocks.getClusterSettings.mockResolvedValue(settings({ enabled: true }));
     const peer = {

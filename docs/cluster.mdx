@@ -170,6 +170,32 @@ a spec-sheet number) that runs far less often — every 5 minutes per
 peer — so it reads `-` until the first measurement lands, same as a
 peer that was only just discovered.
 
+### Incompatible peers
+
+A peer whose RPC protocol version doesn't pair with this node's (a different
+major, or a higher minor than ours) is still listed, but never used for a
+model. `ollama cluster ls` and `ollama cluster status` print a notice under
+the table saying what to upgrade, and the desktop app's cluster settings
+mark the peer "incompatible" with the same text:
+
+```
+Incompatible peers (discovered but never used):
+ID      ADDRESS   VERSION           REASON
+node-a  10.0.0.2  unknown           speaks RPC protocol 7.0, this node needs 8.0: upgrade the peer to match
+node-b  10.0.0.3  0.40.8-cluster.1  speaks RPC protocol 9.0, this node needs 8.0: upgrade this node to match
+```
+
+VERSION is the peer's build version. Builds that predate this feature don't
+send it, so it reads `unknown`. The same fields (`compatible`, `reason`,
+`proto_major`, `proto_minor`, `version`) are on each peer in `GET
+/api/cluster/peers`; a client that doesn't know them can ignore them.
+
+The check compares the protocol version each build advertises. Builds from
+before the advertised version was taken from the bundled llama.cpp all report
+the same version whatever llama.cpp they contain, so they can look compatible
+until both sides run a build that reports it truthfully. `ollama ps` is
+unaffected: an incompatible peer is never scheduled.
+
 ## Checking a running model's spillover
 
 `ollama ps` gains a `CLUSTER` column and a third `PROCESSOR` term once a

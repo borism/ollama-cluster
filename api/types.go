@@ -1024,6 +1024,18 @@ type ClusterPeer struct {
 	// that to 0 -- which omitempty then drops from the response -- made
 	// same-subnet peers look unprobed forever.
 	LatencyMs float64 `json:"latency_ms,omitempty"`
+	// Compatible is false when this peer's RPC protocol can't pair with
+	// ours: it is listed but never scheduled. Reason says why and which
+	// side to upgrade. Clients that don't know these fields (older
+	// servers) should treat a missing Compatible as true.
+	Compatible bool   `json:"compatible"`
+	Reason     string `json:"reason,omitempty"`
+	// ProtoMajor/ProtoMinor is the RPC protocol version the peer speaks.
+	ProtoMajor int `json:"proto_major"`
+	ProtoMinor int `json:"proto_minor"`
+	// Version is the peer's build version; empty if its build doesn't
+	// report one.
+	Version string `json:"version,omitempty"`
 	// BandwidthMbps is our own last-measured one-way throughput to this
 	// peer, in megabits/sec -- a timed payload push, not a spec-sheet
 	// number (see cluster.Peer.BandwidthMbps). Zero until first measured.

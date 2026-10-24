@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/borism/ollama-cluster/ml"
+	"github.com/borism/ollama-cluster/version"
 )
 
 // RPCProtoMajor/RPCProtoMinor are the RPC_PROTO_MAJOR_VERSION/
@@ -38,6 +39,7 @@ type announcement struct {
 	Devices    []ml.DeviceInfo `json:"devices"`
 	ProtoMajor int             `json:"proto_major"`
 	ProtoMinor int             `json:"proto_minor"`
+	Version    string          `json:"version,omitempty"`
 	Load       float64         `json:"load"`
 }
 
@@ -242,6 +244,7 @@ func selfAnnouncement(cfg Config) announcement {
 		Devices:    cfg.SelfDevices(),
 		ProtoMajor: RPCProtoMajor,
 		ProtoMinor: RPCProtoMinor,
+		Version:    version.Version,
 		Load:       cfg.SelfLoad(),
 	}
 }
@@ -356,6 +359,7 @@ func broadcastLoop(ctx context.Context, conn *net.UDPConn, cfg Config, t *Table)
 			Devices:    a.Devices,
 			ProtoMajor: a.ProtoMajor,
 			ProtoMinor: a.ProtoMinor,
+			Version:    a.Version,
 			Load:       a.Load,
 			LastSeen:   time.Now(),
 		})
@@ -535,6 +539,7 @@ func listenLoop(ctx context.Context, conn *net.UDPConn, cfg Config, t *Table) {
 			Devices:    a.Devices,
 			ProtoMajor: a.ProtoMajor,
 			ProtoMinor: a.ProtoMinor,
+			Version:    a.Version,
 			Load:       a.Load,
 			LastSeen:   time.Now(),
 		})

@@ -2888,7 +2888,13 @@ func clusterPeerToAPI(p cluster.Peer) api.ClusterPeer {
 			FreeMemory:  d.FreeMemory,
 		})
 	}
+	reason := p.ProtoIncompatibility()
 	return api.ClusterPeer{
+		Compatible:    reason == "",
+		Reason:        reason,
+		ProtoMajor:    p.ProtoMajor,
+		ProtoMinor:    p.ProtoMinor,
+		Version:       p.Version,
 		ID:            p.ID,
 		Addr:          p.Addr,
 		Addrs:         p.Addrs,

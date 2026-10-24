@@ -48,7 +48,7 @@ func peerFreeMemory(p Peer) uint64 {
 }
 
 func usablePeer(p Peer) bool {
-	return p.RPCPort != 0 && p.ProtoMajor == RPCProtoMajor && p.ProtoMinor <= RPCProtoMinor &&
+	return p.RPCPort != 0 && p.ProtoIncompatibility() == "" &&
 		peerFreeMemory(p) >= minUsefulMemory
 }
 

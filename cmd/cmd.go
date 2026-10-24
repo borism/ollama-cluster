@@ -1372,7 +1372,40 @@ func ClusterListHandler(cmd *cobra.Command, args []string) error {
 	table.AppendBulk(data)
 	table.Render()
 
+	printIncompatiblePeers(os.Stdout, resp.Peers)
+
 	return nil
+}
+
+// printIncompatiblePeers lists peers that were discovered but can't be used
+// because their RPC protocol doesn't match ours, with what to upgrade. It
+// prints nothing when every peer is compatible. A missing Compatible
+// (always false after decoding an older server's response) can't be told
+// from incompatible, so those peers are recognised by Reason being set.
+func printIncompatiblePeers(w io.Writer, peers []api.ClusterPeer) {
+	var data [][]string
+	for _, p := range peers {
+		if p.Compatible || p.Reason == "" {
+			continue
+		}
+		data = append(data, []string{p.ID, p.Addr, cmp.Or(p.Version, "unknown"), p.Reason})
+	}
+	if len(data) == 0 {
+		return
+	}
+	fmt.Fprintln(w, "\nIncompatible peers (discovered but never used):")
+	table := tablewriter.NewWriter(w)
+	table.SetHeader([]string{"ID", "ADDRESS", "VERSION", "REASON"})
+	table.SetAutoWrapText(false)
+	table.SetHeaderAlignment(tablewriter.ALIGN_LEFT)
+	table.SetAlignment(tablewriter.ALIGN_LEFT)
+	table.SetHeaderLine(false)
+	table.SetBorder(false)
+	table.SetNoWhiteSpace(true)
+	table.SetTablePadding("    ")
+	table.AppendBulk(data)
+	table.Render()
+	fmt.Fprintln(w, "Builds from before the advertised protocol was derived from the bundled llama.cpp all report the same version, so they can look compatible until both sides are upgraded.")
 }
 
 // clusterSettingKeys maps api.ClusterConfig's JSON names to the names
@@ -1471,6 +1504,13 @@ func ClusterStatusHandler(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	printClusterConfig(cfg)
+	// Best effort: the settings above are what status is for, so a failure
+	// here (or cluster mode being off) just leaves the peer notice out.
+	if cfg.Enabled {
+		if resp, err := client.ClusterList(cmd.Context()); err == nil {
+			printIncompatiblePeers(os.Stdout, resp.Peers)
+		}
+	}
 	return nil
 }
 

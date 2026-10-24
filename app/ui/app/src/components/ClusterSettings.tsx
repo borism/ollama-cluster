@@ -57,6 +57,7 @@ function formatLastSeen(iso: string): string {
 }
 
 function PeerRow({ peer }: { peer: ClusterPeer }) {
+  const incompatible = peer.compatible === false;
   return (
     <li className="rounded-lg border border-neutral-200 dark:border-neutral-700 p-3 text-sm">
       <div className="flex items-center justify-between">
@@ -64,9 +65,24 @@ function PeerRow({ peer }: { peer: ClusterPeer }) {
           {peer.addr}
         </span>
         <span className="text-neutral-500 dark:text-neutral-400">
-          {peer.sharing ? "sharing" : "not sharing"}
+          {incompatible
+            ? "incompatible"
+            : peer.sharing
+              ? "sharing"
+              : "not sharing"}
         </span>
       </div>
+      {incompatible && (
+        <div
+          role="alert"
+          className="mt-1 flex items-start gap-1 text-amber-700 dark:text-amber-400"
+        >
+          <ExclamationTriangleIcon className="mt-0.5 h-4 w-4 shrink-0" />
+          <span>
+            {`Not used: ${peer.reason || "its RPC protocol doesn't match"} (peer version ${peer.version || "unknown"})`}
+          </span>
+        </div>
+      )}
       {peer.devices.map((device) => (
         <div
           key={device.name}
@@ -114,7 +130,8 @@ export default function ClusterSettings() {
 
   const savedCacheGB = settings?.cache_gb;
   useEffect(() => {
-    if (savedCacheGB !== undefined) setCacheInput(savedCacheGB?.toString() ?? "");
+    if (savedCacheGB !== undefined)
+      setCacheInput(savedCacheGB?.toString() ?? "");
   }, [savedCacheGB]);
 
   const enabled = settings?.enabled ?? false;
@@ -353,9 +370,9 @@ export default function ClusterSettings() {
               <Description>
                 Model weights this computer keeps from peers that used its GPU,
                 so loading the same model again skips the network. Blank (the
-                default) lets it use the disk down to a free-space floor of
-                10 GB or 5%, whichever is more; a number caps it at that many
-                GB. The oldest files go first. 0 turns the cache off.
+                default) lets it use the disk down to a free-space floor of 10
+                GB or 5%, whichever is more; a number caps it at that many GB.
+                The oldest files go first. 0 turns the cache off.
               </Description>
             </div>
           </div>

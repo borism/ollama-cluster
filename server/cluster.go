@@ -169,6 +169,9 @@ func logClusterPeers(ctx context.Context, table *cluster.Table) {
 				now[p.ID] = true
 				if !seen[p.ID] {
 					slog.Info("cluster: peer discovered", "id", p.ID, "addr", p.Addr, "rpc_port", p.RPCPort, "devices", len(p.Devices))
+					if reason := p.ProtoIncompatibility(); reason != "" {
+						slog.Warn("cluster: peer is incompatible and will not be used", "id", p.ID, "addr", p.Addr, "version", p.Version, "reason", reason)
+					}
 				}
 			}
 			for id := range seen {

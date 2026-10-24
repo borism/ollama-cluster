@@ -726,6 +726,14 @@ export interface ClusterPeer {
   load: number;
   latency_ms?: number;
   last_seen: string;
+  // False when the peer's RPC protocol can't pair with ours: it is listed
+  // but never used. Absent from older servers, which means compatible.
+  compatible?: boolean;
+  reason?: string;
+  proto_major?: number;
+  proto_minor?: number;
+  // The peer's build version; absent if its build doesn't report one.
+  version?: string;
 }
 
 // Mirrors api.ClusterListResponse (api/types.go), from GET /api/cluster/peers.
