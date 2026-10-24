@@ -17,17 +17,10 @@ import (
 	"github.com/borism/ollama-cluster/version"
 )
 
-// RPCProtoMajor/RPCProtoMinor are the RPC_PROTO_MAJOR_VERSION/
-// RPC_PROTO_MINOR_VERSION this build's vendored llama.cpp speaks
-// (ggml/include/ggml-rpc.h at the LLAMA_CPP_VERSION tag). Bump these
-// whenever LLAMA_CPP_VERSION changes the RPC protocol: peers advertise
-// them, and a stale value pairs incompatible builds that then fail the
-// RPC handshake at model load. 7.0.0 since b11081 ("rpc : hash-cache only
-// weights").
-const (
-	RPCProtoMajor = 7
-	RPCProtoMinor = 0
-)
+//go:generate go run gen_rpcproto.go
+
+// RPCProtoMajor/RPCProtoMinor are defined in rpcproto_gen.go, generated from
+// llama.cpp's ggml-rpc.h at the LLAMA_CPP_VERSION tag.
 
 // announcement is the JSON payload broadcast on the wire. It's the subset
 // of Peer this node can self-report; Addr and LastSeen are filled in by the
