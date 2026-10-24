@@ -83,6 +83,16 @@ func TestSelectRPCServers(t *testing.T) {
 			wantRPCs: "10.0.0.3:50052",
 		},
 		{
+			name:    "peer ProtoMinor above ours is skipped",
+			gpus:    []ml.DeviceInfo{gpu(1000)},
+			predict: mib(10000),
+			peers: []Peer{
+				peer("10.0.0.2", 50052, RPCProtoMajor, RPCProtoMinor+1, 50000),
+				peer("10.0.0.3", 50052, RPCProtoMajor, 0, 9000),
+			},
+			wantRPCs: "10.0.0.3:50052",
+		},
+		{
 			name:    "RPCPort zero is skipped",
 			gpus:    []ml.DeviceInfo{gpu(1000)},
 			predict: mib(10000),

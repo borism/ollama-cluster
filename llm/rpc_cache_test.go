@@ -117,7 +117,7 @@ func diskWith(dir string, size uint64) func(string) (uint64, uint64, error) {
 }
 
 // With no cap (rpcCacheUnlimited) only the free-space floor evicts, oldest
-// first, and the floor is the larger of 10 GiB and 5% of the volume.
+// first, and the floor is 5% of the volume clamped to 10-15 GiB.
 func TestTidyRPCCacheUnlimitedEvictsOnlyUnderFloor(t *testing.T) {
 	models := t.TempDir()
 	dir := filepath.Join(models, "rpc")
@@ -144,14 +144,27 @@ func TestTidyRPCCacheUnlimitedEvictsOnlyUnderFloor(t *testing.T) {
 		t.Errorf("kept oldest=%v middle=%v newest=%v, want false true true", exists(oldest), exists(middle), exists(newest))
 	}
 
-	// On a 1 TiB volume the floor is 5% (~51 GiB), not 10 GiB: with the
-	// disk reading 20 GiB free, everything goes.
-	big := func(string) (uint64, uint64, error) { return 20 << 30, 1 << 40, nil }
+	// On a 1 TiB volume 5% is ~51 GiB, but the floor stops at 15 GiB: with
+	// the disk reading 12 GiB free (over 10, under 15), everything goes.
+	big := func(string) (uint64, uint64, error) { return 12 << 30, 1 << 40, nil }
 	if tidyRPCCache(dir, rpcCacheUnlimited, now, big) {
-		t.Error("reported room with 20 GiB free of 1 TiB")
+		t.Error("reported room with 12 GiB free of 1 TiB")
 	}
 	if exists(middle) || exists(newest) {
-		t.Error("files kept under a 5% floor")
+		t.Error("files kept under the 15 GiB floor")
+	}
+}
+
+// A big disk that is fairly full keeps its cache: 18 GiB free of 926 GiB is
+// over the 15 GiB cap on the floor, though far under 5% of the volume.
+func TestTidyRPCCacheLargeVolumeLimitedFree(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	tensor := []byte("a weight tensor's bytes")
+	path := writeCacheFile(t, dir, tensor, tensor, now.Add(-time.Hour))
+	disk := func(string) (uint64, uint64, error) { return 18 << 30, 926 << 30, nil }
+	if !tidyRPCCache(dir, rpcCacheUnlimited, now, disk) || !exists(path) {
+		t.Errorf("cache dropped with 18 GiB free of 926 GiB: kept=%v", exists(path))
 	}
 }
 
