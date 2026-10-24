@@ -85,6 +85,9 @@ numbers and open questions.
 See [`docs/cluster.mdx`](docs/cluster.mdx) for environment variables,
 per-request overrides, and current limitations.
 
+See [`docs/comparison.mdx`](docs/comparison.mdx) for how it compares with
+similar projects.
+
 ## Download
 
 **[Latest release](https://github.com/borism/ollama-cluster/releases/latest)**
