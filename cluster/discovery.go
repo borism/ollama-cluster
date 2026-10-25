@@ -14,19 +14,13 @@ import (
 	"time"
 
 	"github.com/borism/ollama-cluster/ml"
+	"github.com/borism/ollama-cluster/version"
 )
 
-// RPCProtoMajor/RPCProtoMinor are the RPC_PROTO_MAJOR_VERSION/
-// RPC_PROTO_MINOR_VERSION this build's vendored llama.cpp speaks
-// (ggml/include/ggml-rpc.h at the LLAMA_CPP_VERSION tag). Bump these
-// whenever LLAMA_CPP_VERSION changes the RPC protocol: peers advertise
-// them, and a stale value pairs incompatible builds that then fail the
-// RPC handshake at model load. 7.0.0 since b11081 ("rpc : hash-cache only
-// weights").
-const (
-	RPCProtoMajor = 7
-	RPCProtoMinor = 0
-)
+//go:generate go run gen_rpcproto.go
+
+// RPCProtoMajor/RPCProtoMinor are defined in rpcproto_gen.go, generated from
+// llama.cpp's ggml-rpc.h at the LLAMA_CPP_VERSION tag.
 
 // announcement is the JSON payload broadcast on the wire. It's the subset
 // of Peer this node can self-report; Addr and LastSeen are filled in by the
@@ -38,6 +32,7 @@ type announcement struct {
 	Devices    []ml.DeviceInfo `json:"devices"`
 	ProtoMajor int             `json:"proto_major"`
 	ProtoMinor int             `json:"proto_minor"`
+	Version    string          `json:"version,omitempty"`
 	Load       float64         `json:"load"`
 }
 
@@ -242,6 +237,7 @@ func selfAnnouncement(cfg Config) announcement {
 		Devices:    cfg.SelfDevices(),
 		ProtoMajor: RPCProtoMajor,
 		ProtoMinor: RPCProtoMinor,
+		Version:    version.Version,
 		Load:       cfg.SelfLoad(),
 	}
 }
@@ -356,6 +352,7 @@ func broadcastLoop(ctx context.Context, conn *net.UDPConn, cfg Config, t *Table)
 			Devices:    a.Devices,
 			ProtoMajor: a.ProtoMajor,
 			ProtoMinor: a.ProtoMinor,
+			Version:    a.Version,
 			Load:       a.Load,
 			LastSeen:   time.Now(),
 		})
@@ -535,6 +532,7 @@ func listenLoop(ctx context.Context, conn *net.UDPConn, cfg Config, t *Table) {
 			Devices:    a.Devices,
 			ProtoMajor: a.ProtoMajor,
 			ProtoMinor: a.ProtoMinor,
+			Version:    a.Version,
 			Load:       a.Load,
 			LastSeen:   time.Now(),
 		})

@@ -25,10 +25,12 @@ import (
 // tidyRPCCache works around both from outside until llama.cpp is fixed.
 const (
 	// The disk space tidyRPCCache keeps free, deleting cache files if it has
-	// to, and below which the worker runs uncached, is the larger of
-	// rpcCacheMinFree and 1/rpcCacheMinFreeDiv of the volume (5%), so big
-	// disks keep proportionally more headroom for models and the OS.
+	// to, and below which the worker runs uncached, is 1/rpcCacheMinFreeDiv
+	// of the volume (5%) clamped to rpcCacheMinFree..rpcCacheMaxFree. The cap
+	// is there because a large disk that is fairly full (18 GiB free of 926)
+	// would otherwise get a floor it never meets and lose its cache.
 	rpcCacheMinFree    = 10 << 30
+	rpcCacheMaxFree    = 15 << 30
 	rpcCacheMinFreeDiv = 20
 	// rpcCacheUnlimited as the size cap means no cap beyond the free-space
 	// floor (OLLAMA_CLUSTER_CACHE_GB unset).
@@ -52,6 +54,8 @@ var rpcCacheFileName = regexp.MustCompile(`^[0-9a-f]{16}$`)
 // tidyRPCCache deletes cache files in dir whose contents don't match their
 // name, then the oldest files until the cache is at most maxBytes
 // (rpcCacheUnlimited for no cap) and the disk has its free-space floor left.
+// A cache over the floor is trimmed to fit, not dropped; it's only emptied
+// when the disk is under the floor even without it.
 // It reports whether that much is free afterwards, i.e. whether there's room
 // to keep caching. If the free space can't be read, an explicit cap is all
 // that applies, and an unlimited one becomes rpcCacheFallbackBytes.
@@ -111,7 +115,7 @@ func tidyRPCCache(dir string, maxBytes uint64, now time.Time, diskFree func(stri
 		if err != nil {
 			return math.MaxUint64, rpcCacheMinFree, false
 		}
-		return free, max(rpcCacheMinFree, total/rpcCacheMinFreeDiv), true
+		return free, min(rpcCacheMaxFree, max(rpcCacheMinFree, total/rpcCacheMinFreeDiv)), true
 	}
 	if _, _, ok := stat(); !ok && maxBytes == rpcCacheUnlimited {
 		maxBytes = rpcCacheFallbackBytes

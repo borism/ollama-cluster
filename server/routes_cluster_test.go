@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"slices"
@@ -77,5 +78,23 @@ func TestClusterPeersHandlerDisabled(t *testing.T) {
 	}
 	if len(resp.Peers) != 0 {
 		t.Errorf("expected no peers, got %d", len(resp.Peers))
+	}
+}
+
+func TestClusterPeerToAPICompatibility(t *testing.T) {
+	ok := clusterPeerToAPI(cluster.Peer{ProtoMajor: cluster.RPCProtoMajor, ProtoMinor: cluster.RPCProtoMinor, Version: "1.2.3"})
+	if !ok.Compatible || ok.Reason != "" || ok.Version != "1.2.3" {
+		t.Errorf("compatible peer: %+v", ok)
+	}
+
+	bad := clusterPeerToAPI(cluster.Peer{ProtoMajor: cluster.RPCProtoMajor + 1})
+	if bad.Compatible || bad.Reason == "" || bad.ProtoMajor != cluster.RPCProtoMajor+1 || bad.Version != "" {
+		t.Errorf("incompatible peer: %+v", bad)
+	}
+
+	// Old clients ignore the new fields; an old server's response lacks them.
+	buf, _ := json.Marshal(api.ClusterPeer{})
+	if bytes.Contains(buf, []byte(`"reason"`)) || bytes.Contains(buf, []byte(`"version"`)) {
+		t.Errorf("empty reason/version should be omitted: %s", buf)
 	}
 }

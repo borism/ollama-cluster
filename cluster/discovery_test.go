@@ -3,11 +3,13 @@ package cluster
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"slices"
 	"testing"
 	"time"
 
+	"github.com/borism/ollama-cluster/api"
 	"github.com/borism/ollama-cluster/ml"
 )
 
@@ -398,5 +400,56 @@ func TestStartStoppedReleasesPort(t *testing.T) {
 	defer cancel2()
 	if _, err := Start(ctx2, cfg); err != nil {
 		t.Fatalf("restart on the same port: %v", err)
+	}
+}
+
+// TestTableKeepsIncompatiblePeers: discovery keeps a peer whose RPC protocol
+// can't pair with ours (so it can be shown), with the reason and which side
+// to upgrade, and placement still never schedules it. The announcement is
+// decoded the way listenLoop does, including one from a build that predates
+// the version field.
+func TestTableKeepsIncompatiblePeers(t *testing.T) {
+	tbl := &Table{peers: make(map[string]Peer), ttl: time.Minute}
+	for _, a := range []string{
+		fmt.Sprintf(`{"id":"old","rpc_port":50052,"proto_major":%d,"proto_minor":0,"version":"0.1.0"}`, RPCProtoMajor-1),
+		fmt.Sprintf(`{"id":"new","rpc_port":50052,"proto_major":%d,"proto_minor":0}`, RPCProtoMajor+1),
+		fmt.Sprintf(`{"id":"minor","rpc_port":50052,"proto_major":%d,"proto_minor":%d}`, RPCProtoMajor, RPCProtoMinor+1),
+		fmt.Sprintf(`{"id":"ok","rpc_port":50052,"proto_major":%d,"proto_minor":%d}`, RPCProtoMajor, RPCProtoMinor),
+	} {
+		var ann announcement
+		if err := json.Unmarshal([]byte(a), &ann); err != nil {
+			t.Fatal(err)
+		}
+		tbl.observe(Peer{ID: ann.ID, RPCPort: ann.RPCPort, ProtoMajor: ann.ProtoMajor, ProtoMinor: ann.ProtoMinor,
+			Version: ann.Version, Devices: []ml.DeviceInfo{gpu(50000)}, Addr: ann.ID, LastSeen: time.Now()})
+	}
+
+	peers := map[string]Peer{}
+	for _, p := range tbl.Peers() {
+		peers[p.ID] = p
+	}
+	if len(peers) != 4 {
+		t.Fatalf("Peers() dropped some: got %d want 4", len(peers))
+	}
+	want := map[string]string{
+		"old":   fmt.Sprintf("speaks RPC protocol %d.0, this node needs %d.%d: upgrade the peer to match", RPCProtoMajor-1, RPCProtoMajor, RPCProtoMinor),
+		"new":   fmt.Sprintf("speaks RPC protocol %d.0, this node needs %d.%d: upgrade this node to match", RPCProtoMajor+1, RPCProtoMajor, RPCProtoMinor),
+		"minor": fmt.Sprintf("speaks RPC protocol %d.%d, this node needs %d.%d: upgrade this node to match", RPCProtoMajor, RPCProtoMinor+1, RPCProtoMajor, RPCProtoMinor),
+		"ok":    "",
+	}
+	for id, reason := range want {
+		if got := peers[id].ProtoIncompatibility(); got != reason {
+			t.Errorf("%s: reason %q, want %q", id, got, reason)
+		}
+	}
+	if peers["old"].Version != "0.1.0" || peers["new"].Version != "" {
+		t.Errorf("version: old=%q new=%q", peers["old"].Version, peers["new"].Version)
+	}
+
+	// Placement is unchanged: only the compatible peer is ever chosen, even
+	// though the incompatible ones are in the table and have more memory.
+	got := SelectRPCServers([]ml.DeviceInfo{gpu(1000)}, mib(10000), tbl.Peers(), api.Options{})
+	if got.RPCServers != "ok:50052" {
+		t.Errorf("RPCServers = %q, want only the compatible peer", got.RPCServers)
 	}
 }
