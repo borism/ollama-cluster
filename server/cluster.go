@@ -187,10 +187,56 @@ func logClusterPeers(ctx context.Context, table *cluster.Table) {
 // localGPUDevices lists this machine's GPUs; a variable so tests can fake it.
 var localGPUDevices = func(ctx context.Context) []ml.DeviceInfo { return discover.GPUDevices(ctx, nil) }
 
+// deviceCacheTTL is how long the cached device list is fresh. A variable so
+// tests can shrink it.
+var deviceCacheTTL = 30 * time.Second
+
+// deviceCache holds the last localGPUDevices result. Querying GPUs can take
+// over a second on a loaded machine, and the menu bar polls the config
+// endpoint with a short timeout, so requests must not wait on it.
+// Name, Description and TotalMemory don't change while the server runs,
+// except on GPU hot-plug, which shows up after at most one refresh.
+var deviceCache struct {
+	mu         sync.Mutex
+	devices    []ml.DeviceInfo
+	fetched    time.Time
+	have       bool
+	refreshing bool
+}
+
+// cachedGPUDevices returns the cached device list. Only the first call
+// waits for discovery; after that a stale list is returned immediately and
+// refreshed in the background (stale-while-revalidate).
+func cachedGPUDevices(ctx context.Context) []ml.DeviceInfo {
+	c := &deviceCache
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.have {
+		// Concurrent first callers queue on the lock rather than each
+		// running discovery. A cancelled request may get a truncated
+		// list, so don't cache that.
+		devs := localGPUDevices(ctx)
+		if ctx.Err() == nil {
+			c.devices, c.fetched, c.have = devs, time.Now(), true
+		}
+		return devs
+	}
+	if time.Since(c.fetched) > deviceCacheTTL && !c.refreshing {
+		c.refreshing = true
+		go func() {
+			devs := localGPUDevices(context.Background())
+			c.mu.Lock()
+			c.devices, c.fetched, c.refreshing = devs, time.Now(), false
+			c.mu.Unlock()
+		}()
+	}
+	return c.devices
+}
+
 // currentClusterConfig is what GET and POST /api/cluster/config return.
 func currentClusterConfig(ctx context.Context) api.ClusterConfig {
 	var devices []api.ClusterDevice
-	for _, d := range localGPUDevices(ctx) {
+	for _, d := range cachedGPUDevices(ctx) {
 		devices = append(devices, api.ClusterDevice{Name: d.Name, Description: d.Description, TotalMemory: d.TotalMemory})
 	}
 	var cacheGB *uint

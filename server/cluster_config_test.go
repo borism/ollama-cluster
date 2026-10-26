@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -28,12 +30,72 @@ func clusterTestHome(t *testing.T) {
 	envconfig.ReloadServerConfig()
 	t.Cleanup(envconfig.ReloadServerConfig)
 
-	// No real GPU discovery in tests.
+	// No real GPU discovery in tests, and no list cached by an earlier test.
 	orig := localGPUDevices
+	deviceCache.mu.Lock()
+	deviceCache.have, deviceCache.refreshing = false, false
+	deviceCache.mu.Unlock()
 	localGPUDevices = func(context.Context) []ml.DeviceInfo {
 		return []ml.DeviceInfo{{Name: "CUDA0", Description: "Test GPU", TotalMemory: 8 << 30}}
 	}
 	t.Cleanup(func() { localGPUDevices = orig })
+}
+
+// GET /api/cluster/config must not re-run GPU discovery per request: it can
+// take over a second, and the macOS menu bar gives the request 500 ms.
+func TestClusterConfigCachesDevices(t *testing.T) {
+	clusterTestHome(t)
+	var calls atomic.Int32
+	localGPUDevices = func(context.Context) []ml.DeviceInfo {
+		calls.Add(1)
+		time.Sleep(300 * time.Millisecond)
+		return []ml.DeviceInfo{{Name: "CUDA0", Description: "Test GPU", TotalMemory: 8 << 30}}
+	}
+	origTTL := deviceCacheTTL
+	deviceCacheTTL = 200 * time.Millisecond
+	t.Cleanup(func() { deviceCacheTTL = origTTL })
+
+	get := func() (api.ClusterConfig, time.Duration) {
+		start := time.Now()
+		cfg := currentClusterConfig(context.Background())
+		return cfg, time.Since(start)
+	}
+	fast := 100 * time.Millisecond
+
+	if cfg, _ := get(); len(cfg.Devices) != 1 { // first call may block
+		t.Fatalf("first call devices = %v", cfg.Devices)
+	}
+	for i := range 3 {
+		cfg, d := get()
+		if d > fast || len(cfg.Devices) != 1 {
+			t.Errorf("cached call %d took %v with %d devices", i, d, len(cfg.Devices))
+		}
+	}
+	if n := calls.Load(); n != 1 {
+		t.Errorf("discovery ran %d times within the TTL, want 1", n)
+	}
+
+	time.Sleep(deviceCacheTTL + 50*time.Millisecond)
+	if cfg, d := get(); d > fast || len(cfg.Devices) != 1 {
+		t.Errorf("call after TTL took %v with %d devices, want stale list immediately", d, len(cfg.Devices))
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for calls.Load() < 2 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n := calls.Load(); n != 2 {
+		t.Errorf("discovery ran %d times after the TTL, want a background refresh (2)", n)
+	}
+	// Let the refresh finish before cleanup restores the fakes.
+	for time.Now().Before(deadline) {
+		deviceCache.mu.Lock()
+		done := !deviceCache.refreshing
+		deviceCache.mu.Unlock()
+		if done {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // fakeClusterRunner counts starts and stops instead of binding real ports.
