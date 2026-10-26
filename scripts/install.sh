@@ -82,6 +82,9 @@ if [ "$OS" = "Darwin" ]; then
     if [ -d "/Applications/Ollama.app" ]; then
         status "Removing existing Ollama installation..."
         rm -rf "/Applications/Ollama.app"
+        # A staged update from the old app would be applied at the next startup
+        # and replace the build we are about to install (see #56).
+        rm -rf "$HOME/Library/Caches/ollama/updates"
     fi
 
     status "Downloading Ollama for macOS..."
