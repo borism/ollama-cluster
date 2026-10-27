@@ -438,6 +438,38 @@ ggml_vulkan: 1 = Intel(R) RaptorLake-S Mobile Graphics Controller (Intel Corpora
 		}
 	})
 
+	t.Run("vulkan uma flag is keyed by Vulkan ordinal, not list position", func(t *testing.T) {
+		// Intel MacBook Pro: BLAS is listed first, so the AMD dGPU is the
+		// second line but ggml_vulkan device 0 (#59).
+		output := `ggml_vulkan: 0 = AMD Radeon Pro 5500M (MoltenVK) | uma: 0 | fp16: 1 | bf16: 0 | warp size: 64 | shared memory: 32768 | int dot: 0 | matrix cores: none
+ggml_vulkan: 1 = Intel(R) UHD Graphics 630 (MoltenVK) | uma: 1 | fp16: 1 | bf16: 0 | warp size: 32 | shared memory: 32768 | int dot: 0 | matrix cores: none
+Available devices:
+  BLAS: Accelerate (0 MiB, 0 MiB free)
+  Vulkan0: AMD Radeon Pro 5500M (8176 MiB, 8176 MiB free)
+  Vulkan1: Intel(R) UHD Graphics 630 (32768 MiB, 1527 MiB free)
+`
+		devices := parseLlamaServerDevicesWithNative(output, "", []string{"/lib/ollama", "/lib/ollama/vulkan"}, nil)
+		if len(devices) != 2 {
+			t.Fatalf("got %d devices, want 2", len(devices))
+		}
+		if devices[0].Description != "AMD Radeon Pro 5500M" || devices[0].Integrated {
+			t.Fatalf("AMD dGPU = %+v, want non-integrated", devices[0])
+		}
+		if devices[1].Description != "Intel(R) UHD Graphics 630" || !devices[1].Integrated {
+			t.Fatalf("Intel iGPU = %+v, want integrated", devices[1])
+		}
+
+		// Linux-style listing: a single Vulkan iGPU and no BLAS.
+		output = `ggml_vulkan: 0 = Intel(R) UHD Graphics 630 (Intel open-source Mesa driver) | uma: 1 | fp16: 1 | bf16: 0 | warp size: 32 | shared memory: 65536 | int dot: 1 | matrix cores: none
+Available devices:
+  Vulkan0: Intel(R) UHD Graphics 630 (32768 MiB, 30000 MiB free)
+`
+		devices = parseLlamaServerDevicesWithNative(output, "", []string{"/lib/ollama", "/lib/ollama/vulkan"}, nil)
+		if len(devices) != 1 || !devices[0].Integrated {
+			t.Fatalf("single Vulkan iGPU = %+v, want integrated", devices)
+		}
+	})
+
 	t.Run("cuda runtime version", func(t *testing.T) {
 		dir := t.TempDir()
 		if err := os.WriteFile(filepath.Join(dir, "libcudart.so.12.8.90"), nil, 0o644); err != nil {

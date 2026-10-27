@@ -330,7 +330,7 @@ func parseLlamaServerDevicesWithNative(output, nativeOutput string, libDirs []st
 			ComputeMinor: computeMinor,
 			LibraryPath:  libDirs,
 			GFXTarget:    gfxByIndex[deviceIndex],
-			Integrated:   isIntegratedLlamaServerDevice(library, deviceIndex, integratedByIndex),
+			Integrated:   isIntegratedLlamaServerDevice(library, vulkanOrdinal(name), integratedByIndex),
 		}
 		if hasNativeDevice {
 			if nativeDevice.DeviceID != "" {
@@ -477,8 +477,25 @@ func inferLibrary(name, description string) string {
 	}
 }
 
-func isIntegratedLlamaServerDevice(library string, deviceIndex int, integratedByIndex map[int]bool) bool {
-	if library == "Vulkan" && integratedByIndex[deviceIndex] {
+// vulkanOrdinal returns N from a llama-server device name like "Vulkan1", or -1.
+// ggml_vulkan's uma lines are numbered by this ordinal, not by the position in
+// the full --list-devices output (which also counts BLAS/Accelerate).
+func vulkanOrdinal(name string) int {
+	n, ok := strings.CutPrefix(name, "Vulkan")
+	if !ok {
+		return -1
+	}
+	i, err := strconv.Atoi(n)
+	if err != nil {
+		return -1
+	}
+	return i
+}
+
+// ordinal is the Vulkan device ordinal (see vulkanOrdinal), not the global
+// device index.
+func isIntegratedLlamaServerDevice(library string, ordinal int, integratedByIndex map[int]bool) bool {
+	if library == "Vulkan" && integratedByIndex[ordinal] {
 		return true
 	}
 
