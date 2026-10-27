@@ -1,32 +1,18 @@
 #import "cluster_menu_darwin.h"
 
 static NSMenu *clusterMenu;
+static NSMenuItem *clusterStatusItem;
 static NSMenuItem *clusterModeItem;
 static NSMutableArray<NSMenuItem *> *clusterShareItems;
 static NSMenuItem *clusterPlacementItem;
 static NSMenuItem *clusterWaterfillItem;
 static NSMenuItem *clusterGreedyItem;
 
-// A filled status dot for the menu's state column, where the checkmark
-// would go. Not a template image, so AppKit keeps its color.
-static NSImage *clusterDot(NSColor *color) {
-    return [NSImage imageWithSize:NSMakeSize(10, 10)
-                          flipped:NO
-                   drawingHandler:^BOOL(NSRect rect) {
-                       [color setFill];
-                       [[NSBezierPath bezierPathWithOvalInRect:NSInsetRect(rect, 1.5, 1.5)] fill];
-                       return YES;
-                   }];
-}
-
-// Green when the setting is on, red when off, grey while the state is not
-// known yet (the server hasn't answered).
+// A standard menu item: AppKit draws the checkmark (on), nothing (off) or
+// a dash (mixed, used while the server hasn't answered yet).
 static NSMenuItem *clusterItem(NSString *title, SEL action, id target) {
     NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:title action:action keyEquivalent:@""];
     [item setTarget:target];
-    [item setOnStateImage:clusterDot([NSColor systemGreenColor])];
-    [item setOffStateImage:clusterDot([NSColor systemRedColor])];
-    [item setMixedStateImage:clusterDot([NSColor systemGrayColor])];
     return item;
 }
 
@@ -42,6 +28,10 @@ static NSString *clusterToolTip(bool on, bool locked, NSString *envVar) {
 
 - (void)addClusterMenuItemsTo:(NSMenu *)menu {
     [menu addItem:[NSMenuItem separatorItem]];
+    // Only shown until the server has answered once.
+    clusterStatusItem = [[NSMenuItem alloc] initWithTitle:@"Cluster: waiting for the server" action:nil keyEquivalent:@""];
+    [clusterStatusItem setEnabled:NO];
+    [menu addItem:clusterStatusItem];
     clusterModeItem = clusterItem(@"Cluster Mode", @selector(toggleClusterMode:), self);
     [menu addItem:clusterModeItem];
     clusterShareItems = [[NSMutableArray alloc] init]; // filled in by refreshClusterMenuState
@@ -86,6 +76,7 @@ static NSString *clusterToolTip(bool on, bool locked, NSString *envVar) {
     // Known once the server has answered; before that, nothing is shown as on or off.
     BOOL reachable = ClusterMenuState(&enabled, &share, &greedy, &enabledLocked, &shareLocked, &placementLocked);
 
+    [clusterStatusItem setHidden:reachable];
     [clusterModeItem setState:!reachable ? NSControlStateValueMixed : enabled ? NSControlStateValueOn : NSControlStateValueOff];
     [clusterModeItem setToolTip:clusterToolTip(enabled, enabledLocked, @"OLLAMA_CLUSTER")];
     [clusterPlacementItem setToolTip:placementLocked ? @"Set by the OLLAMA_CLUSTER_PLACEMENT environment variable" : nil];
