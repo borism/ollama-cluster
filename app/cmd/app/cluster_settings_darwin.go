@@ -4,48 +4,50 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
-	"sync"
 	"time"
 
 	"github.com/borism/ollama-cluster/api"
+	"github.com/borism/ollama-cluster/app/server"
 	"github.com/borism/ollama-cluster/envconfig"
 )
 
 // The menu-bar items show and change the same cluster settings as the
 // Settings page and `ollama cluster`: the app's `ollama serve` owns them
 // (GET/POST /api/cluster/config, saved in ~/.ollama/server.json).
-var clusterMenu struct {
-	sync.Mutex
-	cfg     api.ClusterConfig
-	pending int // changes still being applied; cfg shows them already
-}
+var clusterMenu server.ClusterMenuCache
 
-// clusterMenuState returns the settings to show, refreshed from the server
-// unless a change is still being applied. ok is false while the server
-// can't be reached (e.g. still starting). Called on the main thread as the
-// menu opens, so the request is kept short.
+// clusterMenuState returns the settings to show: what the server last
+// said, which can lag behind it. ok is false until the server has answered
+// once (e.g. still starting). Never waits on the server, as the menu draws
+// it on the main thread; see refreshClusterMenu.
 func clusterMenuState() (cfg api.ClusterConfig, ok bool) {
 	clusterMenu.Lock()
-	if clusterMenu.pending > 0 {
-		defer clusterMenu.Unlock()
-		return clusterMenu.cfg, true
-	}
-	clusterMenu.Unlock()
+	defer clusterMenu.Unlock()
+	return clusterMenu.Cfg, clusterMenu.Known
+}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+// refreshClusterMenu asks the server for the settings, unless a change is
+// still being applied. It can take a while (GET /api/cluster/config
+// re-queries the GPUs), so call it off the main thread. If the server
+// doesn't answer, the menu keeps showing the last settings.
+func refreshClusterMenu() {
+	clusterMenu.Lock()
+	busy := clusterMenu.Pending > 0
+	clusterMenu.Unlock()
+	if busy {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	fresh, err := api.NewClient(envconfig.Host(), http.DefaultClient).ClusterConfig(ctx)
 	if err != nil {
 		slog.Debug("cluster menu: server not reachable", "error", err)
-		return api.ClusterConfig{}, false
 	}
 
 	clusterMenu.Lock()
 	defer clusterMenu.Unlock()
-	if clusterMenu.pending == 0 {
-		clusterMenu.cfg = *fresh
-	}
-	return clusterMenu.cfg, true
+	clusterMenu.Apply(fresh, err)
 }
 
 // updateClusterConfig shows a change in the menu right away and sends it
@@ -56,21 +58,18 @@ func clusterMenuState() (cfg api.ClusterConfig, ok bool) {
 // state again.
 func updateClusterConfig(req api.ClusterConfigRequest, show func(*api.ClusterConfig)) {
 	clusterMenu.Lock()
-	show(&clusterMenu.cfg)
-	clusterMenu.pending++
+	show(&clusterMenu.Cfg)
+	clusterMenu.Pending++
 	clusterMenu.Unlock()
 
 	go func() {
 		cfg, err := api.NewClient(envconfig.Host(), http.DefaultClient).UpdateClusterConfig(context.Background(), &req)
 		clusterMenu.Lock()
 		defer clusterMenu.Unlock()
-		clusterMenu.pending--
+		clusterMenu.Pending--
 		if err != nil {
 			slog.Error("failed to change cluster settings", "error", err)
-			return
 		}
-		if clusterMenu.pending == 0 {
-			clusterMenu.cfg = *cfg
-		}
+		clusterMenu.Apply(cfg, err)
 	}()
 }
