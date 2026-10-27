@@ -19,12 +19,14 @@ static NSImage *clusterDot(NSColor *color) {
                    }];
 }
 
-// Green when the setting is on, red when off.
+// Green when the setting is on, red when off, grey while the state is not
+// known yet (the server hasn't answered).
 static NSMenuItem *clusterItem(NSString *title, SEL action, id target) {
     NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:title action:action keyEquivalent:@""];
     [item setTarget:target];
     [item setOnStateImage:clusterDot([NSColor systemGreenColor])];
     [item setOffStateImage:clusterDot([NSColor systemRedColor])];
+    [item setMixedStateImage:clusterDot([NSColor systemGrayColor])];
     return item;
 }
 
@@ -65,13 +67,26 @@ static NSString *clusterToolTip(bool on, bool locked, NSString *envVar) {
 }
 
 // Called on menuWillOpen, so a change made in Settings or with
-// `ollama cluster` shows up here too.
+// `ollama cluster` shows up here too. Draws the last known settings at
+// once and asks the server for fresh ones in the background: the request
+// can be slow, and a failed one leaves the last settings on screen.
 - (void)refreshClusterMenuState {
+    [self drawClusterMenuState];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        RefreshClusterMenu();
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self drawClusterMenuState];
+        });
+    });
+}
+
+- (void)drawClusterMenuState {
     bool enabled = false, share = false, greedy = false;
     bool enabledLocked = false, shareLocked = false, placementLocked = false;
+    // Known once the server has answered; before that, nothing is shown as on or off.
     BOOL reachable = ClusterMenuState(&enabled, &share, &greedy, &enabledLocked, &shareLocked, &placementLocked);
 
-    [clusterModeItem setState:enabled ? NSControlStateValueOn : NSControlStateValueOff];
+    [clusterModeItem setState:!reachable ? NSControlStateValueMixed : enabled ? NSControlStateValueOn : NSControlStateValueOff];
     [clusterModeItem setToolTip:clusterToolTip(enabled, enabledLocked, @"OLLAMA_CLUSTER")];
     [clusterPlacementItem setToolTip:placementLocked ? @"Set by the OLLAMA_CLUSTER_PLACEMENT environment variable" : nil];
 
@@ -90,7 +105,7 @@ static NSString *clusterToolTip(bool on, bool locked, NSString *envVar) {
         NSMenuItem *item = clusterItem(f[1], @selector(toggleClusterShare:), self);
         [item setRepresentedObject:f[0]];
         BOOL on = [f[2] isEqualToString:@"1"];
-        [item setState:on ? NSControlStateValueOn : NSControlStateValueOff];
+        [item setState:!reachable ? NSControlStateValueMixed : on ? NSControlStateValueOn : NSControlStateValueOff];
         [item setToolTip:clusterToolTip(on, shareLocked, @"OLLAMA_CLUSTER_SHARE or OLLAMA_CLUSTER_SHARE_DEVICES")];
         [item setEnabled:reachable && enabled && !shareLocked];
         [clusterMenu insertItem:item atIndex:at++];
@@ -102,27 +117,27 @@ static NSString *clusterToolTip(bool on, bool locked, NSString *envVar) {
     [clusterGreedyItem setState:greedy ? NSControlStateValueOn : NSControlStateValueOff];
 
     // Sharing and placement only mean something while cluster mode is on
-    // (same as Settings). Nothing is clickable until the server answers,
-    // or when an environment variable decides the setting.
+    // (same as Settings). Nothing is clickable until the server has answered
+    // once, or when an environment variable decides the setting.
     [clusterModeItem setEnabled:reachable && !enabledLocked];
     [clusterPlacementItem setEnabled:reachable && enabled && !placementLocked];
 }
 
 - (void)toggleClusterMode:(NSMenuItem *)sender {
     SetClusterModeEnabled([sender state] != NSControlStateValueOn);
-    [self refreshClusterMenuState];
+    [self drawClusterMenuState];
 }
 
 - (void)toggleClusterShare:(NSMenuItem *)sender {
     ToggleClusterShare((char *)[(NSString *)[sender representedObject] UTF8String]);
-    [self refreshClusterMenuState];
+    [self drawClusterMenuState];
 }
 
 - (void)pickClusterPlacement:(NSMenuItem *)sender {
     if ([sender state] != NSControlStateValueOn) {
         SetClusterPlacementGreedy(sender == clusterGreedyItem);
     }
-    [self refreshClusterMenuState];
+    [self drawClusterMenuState];
 }
 
 @end

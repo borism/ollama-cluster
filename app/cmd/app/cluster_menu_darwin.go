@@ -15,7 +15,8 @@ import (
 
 // ClusterMenuState fills in the settings the menu shows and whether each is
 // locked by an OLLAMA_CLUSTER* environment variable on the server (the
-// menu can't change those). Returns false while the server isn't reachable.
+// menu can't change those). These are the last settings the server gave
+// (it never waits on the server); returns false until it has given any.
 //
 //export ClusterMenuState
 func ClusterMenuState(enabled, share, greedy, enabledLocked, shareLocked, placementLocked *C.bool) C.bool {
@@ -27,6 +28,14 @@ func ClusterMenuState(enabled, share, greedy, enabledLocked, shareLocked, placem
 	*shareLocked = C.bool(cfg.Sources["share"] == "env" || cfg.Sources["share_devices"] == "env")
 	*placementLocked = C.bool(cfg.Sources["placement"] == "env")
 	return C.bool(ok)
+}
+
+// RefreshClusterMenu fetches the settings from the server; it can be slow,
+// so the menu calls it off the main thread and then redraws.
+//
+//export RefreshClusterMenu
+func RefreshClusterMenu() {
+	refreshClusterMenu()
 }
 
 //export SetClusterModeEnabled
@@ -41,7 +50,7 @@ func SetClusterModeEnabled(enabled C.bool) {
 //export ToggleClusterShare
 func ToggleClusterShare(name *C.char) {
 	clusterMenu.Lock()
-	share, devices := server.ClusterShareToggle(clusterMenu.cfg, C.GoString(name))
+	share, devices := server.ClusterShareToggle(clusterMenu.Cfg, C.GoString(name))
 	clusterMenu.Unlock()
 	updateClusterConfig(api.ClusterConfigRequest{Share: &share, ShareDevices: &devices}, func(c *api.ClusterConfig) {
 		c.Share, c.ShareDevices = share, devices
@@ -62,8 +71,8 @@ func SetClusterPlacementGreedy(greedy C.bool) {
 //
 //export ClusterShareItems
 func ClusterShareItems() *C.char {
-	clusterMenu.Lock() // just refreshed by ClusterMenuState
-	cfg := clusterMenu.cfg
+	clusterMenu.Lock() // the settings ClusterMenuState just returned
+	cfg := clusterMenu.Cfg
 	clusterMenu.Unlock()
 	var sb strings.Builder
 	for _, it := range server.ClusterShareItems(cfg) {
