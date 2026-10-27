@@ -420,8 +420,10 @@ func TestTableKeepsIncompatiblePeers(t *testing.T) {
 		if err := json.Unmarshal([]byte(a), &ann); err != nil {
 			t.Fatal(err)
 		}
-		tbl.observe(Peer{ID: ann.ID, RPCPort: ann.RPCPort, ProtoMajor: ann.ProtoMajor, ProtoMinor: ann.ProtoMinor,
-			Version: ann.Version, Devices: []ml.DeviceInfo{gpu(50000)}, Addr: ann.ID, LastSeen: time.Now()})
+		tbl.observe(Peer{
+			ID: ann.ID, RPCPort: ann.RPCPort, ProtoMajor: ann.ProtoMajor, ProtoMinor: ann.ProtoMinor,
+			Version: ann.Version, Devices: []ml.DeviceInfo{gpu(50000)}, Addr: ann.ID, LastSeen: time.Now(),
+		})
 	}
 
 	peers := map[string]Peer{}
