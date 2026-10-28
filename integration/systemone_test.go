@@ -13,12 +13,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/google/go-cmp/cmp"
-	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/borism/ollama-cluster/api"
 	"github.com/borism/ollama-cluster/decision"
 	"github.com/borism/ollama-cluster/internal/decisiontest"
+	"github.com/borism/ollama-cluster/llm"
 	"github.com/borism/ollama-cluster/types/model"
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 )
 
 func runAPISystemOne(t *testing.T, modelName string) {
@@ -61,6 +62,37 @@ func runAPISystemOneVision(t *testing.T, modelName string) {
 	runDecisionCases(t, modelName, decisiontest.Corpus{Cases: cases})
 }
 
+func runAPISystemOneAudio(t *testing.T, modelName string) {
+	question := decodeTestAudio(t)
+	abbeyRoad, docs, _ := decodeTestImages(t)
+	var cases []decisiontest.Case
+	for _, fixture := range []struct {
+		name     string
+		media    []api.ImageData
+		activity string
+	}{
+		{"audio", []api.ImageData{question}, ""},
+		{"road_then_audio", []api.ImageData{abbeyRoad, question}, "crossing"},
+		{"audio_then_desk", []api.ImageData{question, docs}, "working"},
+	} {
+		questions := `"topic":{"type":"choice","instructions":"What does the caller ask about in the recording?","criteria":{"sky":"Why the sky is blue","billing":"A charge on their bill","delivery":"A late delivery"}},
+			"question":{"type":"noul","instructions":"Does the caller ask a question in the recording?","criteria":{}}`
+		topic, asks := "sky", true
+		expected := map[string]decisiontest.Expected{"topic": {Choice: &topic}, "question": {Noul: &asks}}
+		if fixture.activity != "" {
+			questions += `,"activity":{"type":"choice","instructions":"What are the animals in the picture doing?","criteria":{"crossing":"Walking across a road","working":"Working or resting at a desk"}}`
+			expected["activity"] = decisiontest.Expected{Choice: &fixture.activity}
+		}
+		var req decision.Request
+		if err := json.Unmarshal([]byte(`{"state":"A caller left a voice message with the attached recording.","questions":{`+questions+`}}`), &req); err != nil {
+			t.Fatal(err)
+		}
+		req.Images = fixture.media
+		cases = append(cases, decisiontest.Case{ID: fixture.name, Dataset: "ollama-audio", Request: req, Expected: expected})
+	}
+	runDecisionCases(t, modelName, decisiontest.Corpus{Cases: cases})
+}
+
 func runDecisionCorpus(t *testing.T, modelName, path string) {
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
 		t.Skipf("decision corpus unavailable: %s", path)
@@ -83,8 +115,18 @@ func runDecisionCases(t *testing.T, modelName string, corpus decisiontest.Corpus
 	defer cancel()
 	requireCapability(loadCtx, t, client, modelName, model.CapabilityDecision)
 	skipIfModelTooLargeForVRAM(loadCtx, t, client, modelName)
-	if corpus.HasImages() {
-		requireCapability(loadCtx, t, client, modelName, model.CapabilityVision)
+	media := map[model.Capability]bool{}
+	for _, c := range corpus.Cases {
+		for _, data := range c.Request.Images {
+			if llm.DetectMediaKind(data) == llm.MediaKindAudio {
+				media[model.CapabilityAudio] = true
+			} else {
+				media[model.CapabilityVision] = true
+			}
+		}
+	}
+	for capability := range media {
+		requireCapability(loadCtx, t, client, modelName, capability)
 	}
 	endpoint = "http://" + endpoint + "/v1/systemone"
 	score := func(t *testing.T, req decision.Request) decisiontest.Response {
