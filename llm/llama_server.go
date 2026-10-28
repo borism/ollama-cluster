@@ -2821,7 +2821,9 @@ func (s *llamaServerRunner) MemorySize() (total, vram uint64) {
 func PredictServerVRAM(modelPath string, f *gguf.Model, numCtx int) uint64 {
 	weights := modelFileSize(modelPath, f)
 
-	// KV cache: 2 (K+V) * layers * kv_heads * head_dim * context * 2 bytes (f16)
+	// KV cache: 2 (K+V) * layers * kv_heads * head_dim * context * bytes per
+	// element, at OLLAMA_KV_CACHE_TYPE (f16 counts 2.0, so a q4_0 cache is
+	// 3.5x smaller than it was once counted).
 	layers := f.KV().BlockCount()
 	kvHeads := f.KV().HeadCountKVMin()
 	if kvHeads == 0 {
@@ -2831,9 +2833,22 @@ func PredictServerVRAM(modelPath string, f *gguf.Model, numCtx int) uint64 {
 	if f.KV().HeadCountMax() > 0 {
 		headDim = f.KV().EmbeddingLength() / f.KV().HeadCountMax()
 	}
-	kvCache := 2 * layers * kvHeads * headDim * uint64(numCtx) * 2
+	kvCache := uint64(float64(2*layers*kvHeads*headDim*uint64(numCtx)) * kvBytesPerElement(envconfig.KvCacheType()))
 
 	return weights + kvCache
+}
+
+// kvBytesPerElement is the size of one K or V element for a --cache-type-k/v
+// value (ggml block sizes: q8_0 is 34 bytes per 32 elements, q4_0 18 per 32).
+func kvBytesPerElement(cacheType string) float64 {
+	switch strings.ToLower(cacheType) {
+	case "q8_0":
+		return 34.0 / 32
+	case "q4_0":
+		return 18.0 / 32
+	default:
+		return 2
+	}
 }
 
 // memoryParsingWriter wraps an io.Writer and parses llama-server log output

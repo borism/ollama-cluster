@@ -4081,3 +4081,17 @@ func TestLlamaServerCompletionThinkingFormat(t *testing.T) {
 		t.Errorf("json format converted a schema, %d conversions", got)
 	}
 }
+
+// TestKVBytesPerElement: PredictServerVRAM used to count every KV cache as
+// f16, so a q4_0 cache at 128K context looked 3.5x bigger than it is and made
+// cluster placement add a peer the model never needed.
+func TestKVBytesPerElement(t *testing.T) {
+	for _, c := range []struct {
+		cacheType string
+		want      float64
+	}{{"", 2}, {"f16", 2}, {"q8_0", 1.0625}, {"Q4_0", 0.5625}} {
+		if got := kvBytesPerElement(c.cacheType); got != c.want {
+			t.Errorf("kvBytesPerElement(%q) = %v, want %v", c.cacheType, got, c.want)
+		}
+	}
+}
