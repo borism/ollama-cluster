@@ -7,6 +7,7 @@ import (
 	"net"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -117,13 +118,12 @@ func waterFill(rates, links, caps []float64) []float64 {
 //     kept as an option for comparison or when minimizing hops matters
 //     more than balancing.
 //
-// Either way, the actual byte split across included servers is still
-// llama.cpp's own job (automatic, proportional to each device's reported
-// free memory) unless opts.TensorSplit overrides it manually
-// (llm/llama_server.go's appendRPCArgs); this function only decides which
-// peers are worth the hop and in what priority order. The "waterfill"
-// rate is a 0..1 headroom score, not a measured tokens/sec -- a real
-// per-device throughput bench is still a fast-follow.
+// Either way the policies only nominate candidates. With one local GPU and
+// no opts.TensorSplit, fillSplit then lays the model out local-first and
+// keeps only the peers that get weights, setting opts.TensorSplit; otherwise
+// the byte split is llama.cpp's own (automatic, proportional to each
+// device's reported free memory). The "waterfill" rate is a 0..1 headroom
+// score, not a measured tokens/sec.
 func SelectRPCServers(gpus []ml.DeviceInfo, predicted uint64, peers []Peer, opts api.Options) api.Options {
 	if opts.RPCServers != "" {
 		return opts
@@ -157,7 +157,74 @@ func SelectRPCServers(gpus []ml.DeviceInfo, predicted uint64, peers []Peer, opts
 	}
 
 	opts.RPCServers = strings.Join(addrs, ",")
+	if opts.TensorSplit == "" {
+		if picked, split, ok := fillSplit(gpus, predicted, peersAt(usable, addrs)); ok {
+			opts.RPCServers = strings.Join(picked, ",")
+			opts.TensorSplit = split
+		}
+	}
 	return opts
+}
+
+// peersAt returns the peers of usable whose --rpc address is in addrs.
+func peersAt(usable []Peer, addrs []string) []Peer {
+	return slices.DeleteFunc(slices.Clone(usable), func(p Peer) bool { return !slices.Contains(addrs, rpcAddr(p)) })
+}
+
+// fillMargin is what a device keeps back from fillSplit for memory the split
+// does not count: the CUDA/Metal context, compute buffers and the vision
+// projector. Measured on a 20 GiB RTX A4500 (docs/cluster-benchmarks.mdx):
+// everything but weights and KV came to 0.5-2.6 GiB.
+const fillMargin = 3 << 30
+
+// fillSplit lays the model out for speed instead of for free memory: the
+// local GPU takes as much as fits, then the peers in order of free memory
+// (largest first, a stand-in for speed), and a peer that is not needed gets
+// nothing and is left out of --rpc. It returns the peers kept, in --rpc order,
+// and the matching --tensor-split (peers first, then the local GPU -- see
+// api.Runner.TensorSplit). llama.cpp's own split is proportional to free
+// memory, which puts weights on a slow peer just because it has room: on a
+// 3-device fleet that cost 2x (docs/cluster-benchmarks.mdx).
+//
+// ok is false -- keep llama.cpp's split and its --fit -- when the layout isn't
+// simple: no GPU or more than one local (their order and library are
+// llama.cpp's call), an integrated GPU (not faster than a peer), or a model
+// that doesn't fit the devices at all (--fit then spills to CPU, and an
+// explicit split would turn that off).
+func fillSplit(gpus []ml.DeviceInfo, need uint64, peers []Peer) (kept []string, split string, ok bool) {
+	if len(gpus) != 1 || gpus[0].Integrated {
+		return nil, "", false
+	}
+	// ponytail: free memory as the speed rank; a bandwidth table or a measured
+	// bench per device name would order a fast small peer before a slow big one.
+	ranked := slices.Clone(peers)
+	sort.SliceStable(ranked, func(i, j int) bool { return peerFreeMemory(ranked[i]) > peerFreeMemory(ranked[j]) })
+
+	room := func(free uint64) uint64 {
+		if free > fillMargin {
+			return free - fillMargin
+		}
+		return 0
+	}
+	left := need
+	take := func(room uint64) uint64 {
+		n := min(left, room)
+		left -= n
+		return n
+	}
+	localTake := take(room(localAvailable(gpus)))
+	var shares []string
+	for _, p := range ranked {
+		if n := take(room(peerFreeMemory(p))); n > 0 {
+			kept = append(kept, rpcAddr(p))
+			shares = append(shares, strconv.FormatUint(n>>20, 10))
+		}
+	}
+	if left > 0 {
+		return nil, "", false
+	}
+	shares = append(shares, strconv.FormatUint(localTake>>20, 10))
+	return kept, strings.Join(shares, ","), true
 }
 
 // selectGreedy: peers ranked by free memory descending, added until the

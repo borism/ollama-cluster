@@ -625,12 +625,13 @@ type Runner struct {
 	// at the front of the list to minimize network transfers"), so with
 	// one local GPU and one RPC peer, TensorSplit[0] is the peer and
 	// TensorSplit[1] is local -- confirmed against a real load
-	// (2026-09-20). Empty leaves the split
-	// to llama.cpp's automatic --fit, proportional to free memory
-	// (llama.cpp's default). Independent of RPCServers/RPCAuto/RPCPlacement --
-	// this only overrides the split ratio, not which peers are used, and
-	// only takes effect alongside a non-empty RPCServers (manual or
-	// auto-selected).
+	// (2026-09-20). Empty: with peers the server picked itself and one
+	// local GPU, the server fills that GPU first and spills only the rest
+	// onto the peers (cluster.SelectRPCServers); otherwise llama.cpp's
+	// automatic --fit decides, proportional to free memory (llama.cpp's
+	// default). Independent of RPCAuto/RPCPlacement -- this only overrides
+	// the split ratio, not which peers are used, and only takes effect
+	// alongside a non-empty RPCServers (manual or auto-selected).
 	TensorSplit string `json:"tensor_split,omitempty"`
 }
 
