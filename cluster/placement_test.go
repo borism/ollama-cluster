@@ -1,11 +1,14 @@
 package cluster
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"io"
+	"log/slog"
 	"math"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -403,5 +406,43 @@ func TestDialRPC(t *testing.T) {
 		if err := DialRPC(addr); err == nil {
 			t.Errorf("%s: DialRPC passed, want an error", name)
 		}
+	}
+}
+
+// TestPlacementLogsCandidates: one INFO line per decision that names every
+// peer handed to placement, including the ones it could not use, so a peer
+// that went missing from the pick can be explained afterwards (#71).
+func TestPlacementLogsCandidates(t *testing.T) {
+	var buf bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(old) })
+
+	now := time.Now()
+	big := peerAt("10.0.0.2", 25600, 0, 0)
+	big.LastSeen = now
+	restarting := peerAt("10.0.0.3", 12288, 0, 0)
+	restarting.RPCPort = 0
+	old2 := peerAt("10.0.0.4", 12288, 0, 0)
+	old2.ProtoMajor = RPCProtoMajor - 1
+
+	got := SelectRPCServers([]ml.DeviceInfo{gpu(2000)}, mib(4000), []Peer{big, restarting, old2}, api.Options{})
+	if got.RPCServers != "10.0.0.2:50052" {
+		t.Fatalf("RPCServers = %q", got.RPCServers)
+	}
+	out := buf.String()
+	if strings.Count(out, "cluster: placement") != 1 {
+		t.Fatalf("want exactly one placement line, got:\n%s", out)
+	}
+	for _, want := range []string{"10.0.0.2 free=25.0 GiB rpc_port=50052", "beacon_age=0s: usable", "10.0.0.3 free=12.0 GiB rpc_port=0", "not sharing (rpc_port 0)", "speaks RPC protocol", "rpc_servers=10.0.0.2:50052"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log lacks %q:\n%s", want, out)
+		}
+	}
+
+	buf.Reset()
+	SelectRPCServers([]ml.DeviceInfo{gpu(8000)}, mib(4000), []Peer{big}, api.Options{})
+	if buf.Len() != 0 {
+		t.Errorf("logged although the model fits locally:\n%s", buf.String())
 	}
 }

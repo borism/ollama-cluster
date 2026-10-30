@@ -16,6 +16,7 @@ import (
 
 	"github.com/borism/ollama-cluster/api"
 	"github.com/borism/ollama-cluster/envconfig"
+	"github.com/borism/ollama-cluster/format"
 	"github.com/borism/ollama-cluster/ml"
 )
 
@@ -143,13 +144,19 @@ func SelectRPCServers(gpus []ml.DeviceInfo, predicted uint64, peers []Peer, opts
 			usable = append(usable, p)
 		}
 	}
-	if len(usable) == 0 {
-		return opts
-	}
 
 	policy := opts.RPCPlacement
 	if policy == "" {
 		policy = envconfig.ClusterPlacement()
+	}
+	// One line per decision, so a peer that was left out can be explained.
+	defer func() {
+		slog.Info("cluster: placement", "predicted", format.HumanBytes2(predicted), "local", format.HumanBytes2(local),
+			"policy", policy, "candidates", describePeers(peers, time.Now()),
+			"rpc_servers", opts.RPCServers, "tensor_split", opts.TensorSplit)
+	}()
+	if len(usable) == 0 {
+		return opts
 	}
 
 	var addrs []string
@@ -167,6 +174,34 @@ func SelectRPCServers(gpus []ml.DeviceInfo, predicted uint64, peers []Peer, opts
 		}
 	}
 	return opts
+}
+
+// describePeers is one log field naming every peer placement was handed with
+// its free memory, rpc_port, whether it was usable (and if not, why) and how
+// long ago its last beacon was.
+func describePeers(peers []Peer, now time.Time) string {
+	if len(peers) == 0 {
+		return "none"
+	}
+	parts := make([]string, len(peers))
+	for i, p := range peers {
+		verdict := "usable"
+		switch {
+		case p.RPCPort == 0:
+			verdict = "not sharing (rpc_port 0)"
+		case p.ProtoIncompatibility() != "":
+			verdict = p.ProtoIncompatibility()
+		case peerFreeMemory(p) < minUsefulMemory:
+			verdict = "under 1 GiB free"
+		}
+		age := "unknown"
+		if !p.LastSeen.IsZero() {
+			age = now.Sub(p.LastSeen).Round(100 * time.Millisecond).String()
+		}
+		parts[i] = fmt.Sprintf("%s free=%s rpc_port=%d proto=%d.%d beacon_age=%s: %s",
+			p.Addr, format.HumanBytes2(peerFreeMemory(p)), p.RPCPort, p.ProtoMajor, p.ProtoMinor, age, verdict)
+	}
+	return strings.Join(parts, "; ")
 }
 
 // peersAt returns the peers of usable whose --rpc address is in addrs.
