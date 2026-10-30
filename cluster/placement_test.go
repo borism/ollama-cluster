@@ -302,3 +302,47 @@ func TestSelectReachableRPCServers(t *testing.T) {
 		}
 	})
 }
+
+// TestSelectRPCServersFillsLocalFirst: a 20 GiB GPU (17.7 GiB free) next to a
+// big fast-enough peer and a small slow one. The default (waterfill) policy
+// used to list both peers and let llama.cpp split by free memory, which put
+// weights on the small peer; the fill keeps the GPU full, uses the big peer
+// for the rest and leaves the small one out. Numbers are MiB:
+// GPU room = 18125 - 457 reserve - 3072 margin = 14596; big peer room = 22528.
+func TestSelectRPCServersFillsLocalFirst(t *testing.T) {
+	gpus := []ml.DeviceInfo{gpu(18125)}
+	big := peerAt("10.0.0.2", 25600, 0, time.Millisecond)
+	small := peerAt("10.0.0.3", 12288, 0, 0) // idle and closer, so waterfill alone ranks it first
+	peers := []Peer{small, big}
+
+	for _, policy := range []string{"waterfill", "greedy"} {
+		got := SelectRPCServers(gpus, mib(25600), peers, api.Options{Runner: api.Runner{RPCPlacement: policy}})
+		if got.RPCServers != "10.0.0.2:50052" || got.TensorSplit != "11004,14596" {
+			t.Fatalf("%s: got rpc %q split %q, want only the big peer, split 11004,14596", policy, got.RPCServers, got.TensorSplit)
+		}
+	}
+
+	// Needs both peers: the big one first, then the small one for the rest.
+	got := SelectRPCServers(gpus, mib(40960), peers, api.Options{})
+	if got.RPCServers != "10.0.0.2:50052,10.0.0.3:50052" || got.TensorSplit != "22528,3836,14596" {
+		t.Fatalf("both peers: got rpc %q split %q", got.RPCServers, got.TensorSplit)
+	}
+
+	// Does not fit anywhere: keep llama.cpp's split (and its --fit CPU spill).
+	got = SelectRPCServers(gpus, mib(80000), peers, api.Options{})
+	if got.TensorSplit != "" {
+		t.Fatalf("model larger than all devices: split %q, want none", got.TensorSplit)
+	}
+
+	// A split the caller chose is never replaced.
+	got = SelectRPCServers(gpus, mib(25600), peers, api.Options{Runner: api.Runner{TensorSplit: "1,1"}})
+	if got.TensorSplit != "1,1" {
+		t.Fatalf("explicit split replaced: %q", got.TensorSplit)
+	}
+
+	// Two local GPUs: their order is llama.cpp's, leave the split alone.
+	got = SelectRPCServers([]ml.DeviceInfo{gpu(18125), gpu(18125)}, mib(60000), peers, api.Options{})
+	if got.TensorSplit != "" {
+		t.Fatalf("multi-GPU: split %q, want none", got.TensorSplit)
+	}
+}

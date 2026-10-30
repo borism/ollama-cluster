@@ -47,6 +47,10 @@ type LlmRequest struct {
 	// excludeRPC holds peers (host:port) that failed to connect during load;
 	// non-empty means the single peer retry has been used.
 	excludeRPC map[string]bool
+	// noFillSplit drops the --tensor-split cluster.SelectRPCServers chose,
+	// after a load that used it ran out of memory (an explicit split turns
+	// off llama.cpp's --fit, so a margin that is too thin must not be final).
+	noFillSplit bool
 
 	// numCtxAuto is true when NumCtx came from Ollama's automatic VRAM-tier
 	// default rather than explicit request, model, or environment config.
@@ -608,6 +612,9 @@ func (s *Scheduler) load(req *LlmRequest, systemInfo ml.SystemInfo, gpus []ml.De
 					return req.excludeRPC[fmt.Sprintf("%s:%d", p.Addr, p.RPCPort)]
 				})
 				reqOpts = cluster.SelectReachableRPCServers(gpus, predicted, peers, reqOpts, cluster.DialRPC)
+				if req.noFillSplit {
+					reqOpts.TensorSplit = req.opts.TensorSplit
+				}
 			}
 			loadGpus, launchOpts = selectLlamaServerPlacement(systemInfo, gpus, predicted, reqOpts)
 			availableForBatch, _, _ := availableMemoryForPlacement(systemInfo, loadGpus, launchOpts)
@@ -724,6 +731,12 @@ func (s *Scheduler) load(req *LlmRequest, systemInfo ml.SystemInfo, gpus []ml.De
 		if addr, ok := failedRPCPeer(err.Error(), launchOpts.RPCServers); ok && req.opts.RPCServers == "" && len(req.excludeRPC) == 0 {
 			slog.Warn("cluster: peer failed during load, retrying without it", "addr", addr)
 			req.excludeRPC = map[string]bool{addr: true}
+			return s.load(req, systemInfo, gpus, requireFull)
+		}
+
+		if retryWithoutFillSplit(launchOpts, req, err) {
+			slog.Warn("cluster: load ran out of memory with the computed tensor split, retrying with llama.cpp's own split", "tensor_split", launchOpts.TensorSplit)
+			req.noFillSplit = true
 			return s.load(req, systemInfo, gpus, requireFull)
 		}
 
@@ -846,6 +859,13 @@ iGPUScan:
 	}()
 
 	return false
+}
+
+// retryWithoutFillSplit reports whether a failed load used a tensor split the
+// server computed (launch differs from what the request asked for) and ran out
+// of memory, and no retry without it has been made yet.
+func retryWithoutFillSplit(launch api.Options, req *LlmRequest, err error) bool {
+	return launch.TensorSplit != req.opts.TensorSplit && !req.noFillSplit && llm.IsOutOfMemory(err)
 }
 
 var failedRPCConnect = regexp.MustCompile(`Failed to connect to (\S+)`)
