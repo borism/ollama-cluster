@@ -1,8 +1,14 @@
 package cluster
 
 import (
+	"bytes"
+	"encoding/binary"
 	"errors"
+	"io"
+	"log/slog"
 	"math"
+	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -334,8 +340,8 @@ func TestSelectRPCServersFillsLocalFirst(t *testing.T) {
 		t.Fatalf("model larger than all devices: split %q, want none", got.TensorSplit)
 	}
 
-	// A split the caller chose is never replaced.
-	got = SelectRPCServers(gpus, mib(25600), peers, api.Options{Runner: api.Runner{TensorSplit: "1,1"}})
+	// A split the caller chose (with the peers it chose) is never replaced.
+	got = SelectRPCServers(gpus, mib(25600), peers, api.Options{Runner: api.Runner{RPCServers: "10.0.0.2:50052", TensorSplit: "1,1"}})
 	if got.TensorSplit != "1,1" {
 		t.Fatalf("explicit split replaced: %q", got.TensorSplit)
 	}
@@ -344,5 +350,132 @@ func TestSelectRPCServersFillsLocalFirst(t *testing.T) {
 	got = SelectRPCServers([]ml.DeviceInfo{gpu(18125), gpu(18125)}, mib(60000), peers, api.Options{})
 	if got.TensorSplit != "" {
 		t.Fatalf("multi-GPU: split %q, want none", got.TensorSplit)
+	}
+}
+
+// fakeRPCWorker listens on localhost and runs serve for each accepted
+// connection; it returns the address to dial.
+func fakeRPCWorker(t *testing.T, serve func(net.Conn)) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("no localhost listener: %v", err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				serve(c)
+			}()
+		}
+	}()
+	return ln.Addr().String()
+}
+
+// helloReply answers a HELLO the way rpc_serve_client does.
+func helloReply(c net.Conn, major, minor byte) {
+	req := make([]byte, 1+8+rpcConnCapsSize)
+	if _, err := io.ReadFull(c, req); err != nil || req[0] != rpcCmdHello {
+		return
+	}
+	rsp := make([]byte, 8+4+rpcConnCapsSize)
+	binary.LittleEndian.PutUint64(rsp, 4+rpcConnCapsSize)
+	rsp[8], rsp[9] = major, minor
+	c.Write(rsp)
+}
+
+// TestDialRPC: a worker that accepts the TCP connection and then resets it
+// (or hangs up, or speaks another protocol) must not pass the check, because
+// llama-server aborts the whole load on it without naming the peer (#70).
+func TestDialRPC(t *testing.T) {
+	healthy := fakeRPCWorker(t, func(c net.Conn) { helloReply(c, RPCProtoMajor, RPCProtoMinor) })
+	if err := DialRPC(healthy); err != nil {
+		t.Errorf("healthy worker: %v", err)
+	}
+
+	resets := fakeRPCWorker(t, func(c net.Conn) { c.(*net.TCPConn).SetLinger(0) }) // close sends RST
+	hangsUp := fakeRPCWorker(t, func(c net.Conn) {})
+	oldMajor := fakeRPCWorker(t, func(c net.Conn) { helloReply(c, RPCProtoMajor-1, 0) })
+	newerMinor := fakeRPCWorker(t, func(c net.Conn) { helloReply(c, RPCProtoMajor, RPCProtoMinor+1) })
+	for name, addr := range map[string]string{"reset": resets, "hang up": hangsUp, "other major": oldMajor, "newer minor": newerMinor} {
+		if err := DialRPC(addr); err == nil {
+			t.Errorf("%s: DialRPC passed, want an error", name)
+		}
+	}
+}
+
+// TestPlacementLogsCandidates: one INFO line per decision that names every
+// peer handed to placement, including the ones it could not use, so a peer
+// that went missing from the pick can be explained afterwards (#71).
+func TestPlacementLogsCandidates(t *testing.T) {
+	var buf bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(old) })
+
+	now := time.Now()
+	big := peerAt("10.0.0.2", 25600, 0, 0)
+	big.LastSeen = now
+	restarting := peerAt("10.0.0.3", 12288, 0, 0)
+	restarting.RPCPort = 0
+	old2 := peerAt("10.0.0.4", 12288, 0, 0)
+	old2.ProtoMajor = RPCProtoMajor - 1
+
+	got := SelectRPCServers([]ml.DeviceInfo{gpu(2000)}, mib(4000), []Peer{big, restarting, old2}, api.Options{})
+	if got.RPCServers != "10.0.0.2:50052" {
+		t.Fatalf("RPCServers = %q", got.RPCServers)
+	}
+	out := buf.String()
+	if strings.Count(out, "cluster: placement") != 1 {
+		t.Fatalf("want exactly one placement line, got:\n%s", out)
+	}
+	for _, want := range []string{"10.0.0.2 free=25.0 GiB rpc_port=50052", "beacon_age=0s: usable", "10.0.0.3 free=12.0 GiB rpc_port=0", "not sharing (rpc_port 0)", "speaks RPC protocol", "rpc_servers=10.0.0.2:50052"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log lacks %q:\n%s", want, out)
+		}
+	}
+
+	buf.Reset()
+	SelectRPCServers([]ml.DeviceInfo{gpu(8000)}, mib(4000), []Peer{big}, api.Options{})
+	if buf.Len() != 0 {
+		t.Errorf("logged although the model fits locally:\n%s", buf.String())
+	}
+}
+
+// TestTensorSplitNeedsExplicitRPCServers: a tensor_split sent without
+// rpc_servers would be applied to whatever peers (and order) auto-selection
+// returns, so it is dropped; with rpc_servers it is the caller's (#74).
+func TestTensorSplitNeedsExplicitRPCServers(t *testing.T) {
+	gpus := []ml.DeviceInfo{gpu(18125)}
+	peers := []Peer{peerAt("10.0.0.2", 25600, 0, 0), peerAt("10.0.0.3", 12288, 0, 0)}
+	dial := func(string) error { return nil }
+	ask := api.Options{Runner: api.Runner{TensorSplit: "4,6"}}
+
+	for name, got := range map[string]api.Options{
+		"select":    SelectRPCServers(gpus, mib(25600), peers, ask),
+		"reachable": SelectReachableRPCServers(gpus, mib(25600), peers, ask, dial),
+	} {
+		if got.TensorSplit == "4,6" {
+			t.Errorf("%s: the caller's tensor_split was applied to auto-selected peers", name)
+		}
+		// The computed fill (peers first, then the GPU) takes its place.
+		if got.RPCServers != "10.0.0.2:50052" || got.TensorSplit != "11004,14596" {
+			t.Errorf("%s: rpc %q split %q, want the fill 11004,14596 on the big peer", name, got.RPCServers, got.TensorSplit)
+		}
+	}
+
+	// Nothing selected and nothing explicit: the split is not applied either.
+	if got := SelectRPCServers(gpus, mib(1000), peers, ask); got.TensorSplit != "" {
+		t.Errorf("local-only: split %q, want none", got.TensorSplit)
+	}
+
+	explicit := api.Options{Runner: api.Runner{RPCServers: "10.0.0.3:50052,10.0.0.2:50052", TensorSplit: "4,6,10"}}
+	if got := SelectReachableRPCServers(gpus, mib(25600), peers, explicit, dial); got.TensorSplit != "4,6,10" || got.RPCServers != explicit.RPCServers {
+		t.Errorf("explicit rpc_servers: got %q / %q, want the request's own", got.RPCServers, got.TensorSplit)
 	}
 }

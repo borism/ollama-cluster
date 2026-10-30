@@ -3,8 +3,10 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -2336,6 +2338,15 @@ func TestSchedLoadRetriesWithoutFailedRPCPeer(t *testing.T) {
 			if err != nil {
 				return
 			}
+			// Answer the RPC HELLO (cluster.DialRPC) so the peer passes the
+			// reachability check; it is the mock llama-server that then fails.
+			req := make([]byte, 1+8+24)
+			if _, err := io.ReadFull(c, req); err == nil {
+				rsp := make([]byte, 8+4+24)
+				binary.LittleEndian.PutUint64(rsp, 4+24)
+				rsp[8], rsp[9] = cluster.RPCProtoMajor, cluster.RPCProtoMinor
+				c.Write(rsp)
+			}
 			c.Close()
 		}
 	}()
@@ -2397,6 +2408,10 @@ func TestRetryWithoutFillSplit(t *testing.T) {
 	}
 	if retryWithoutFillSplit(computed, &LlmRequest{noFillSplit: true}, oom) {
 		t.Fatal("already retried: want no second retry")
+	}
+	// A split the request set without rpc_servers was dropped, nothing computed.
+	if retryWithoutFillSplit(api.Options{}, &LlmRequest{opts: computed}, oom) {
+		t.Fatal("no split launched: want no retry")
 	}
 	same := &LlmRequest{opts: computed}
 	if retryWithoutFillSplit(computed, same, oom) {

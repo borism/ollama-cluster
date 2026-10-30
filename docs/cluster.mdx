@@ -273,10 +273,11 @@ One deliberate exception: a peer with less than 1 GiB of spare memory is
 skipped entirely, even if it could hold a layer or two — not worth a
 network hop for that little. That slice goes to CPU too.
 
-A peer that shows up in `ollama cluster ls` but doesn't accept a
-connection on its RPC port (a firewall, macOS Local Network permission
-not granted, or it just went away) is skipped the same way: each picked
-peer gets a quick connection check before the model loads, and placement
+A peer that shows up in `ollama cluster ls` but doesn't answer on its RPC
+port (a firewall, macOS Local Network permission not granted, it just went
+away, its worker resets connections, or the worker is busy serving another
+head) is skipped the same way: each picked peer gets a quick check before the
+model loads (a connection plus the worker's protocol handshake), and placement
 is redone without the ones that fail, with a `cluster: skipping
 unreachable peer` warning in the server log. If a peer passes that check
 but drops before `llama-server` connects to it, the load is retried once
@@ -351,7 +352,10 @@ peers actually got used:
   gets (llama-server's `--tensor-split`). Note the device order: since
   Ollama never passes `--device`, every RPC peer sorts *before* every local
   GPU, so with one local GPU and one RPC peer, `tensor_split[0]` is the
-  peer and `tensor_split[1]` is local. Leave unset and, for peers the server
+  peer and `tensor_split[1]` is local. Only used together with `rpc_servers`:
+  without it the server picks the peers and their order, so the entries would
+  land on different devices from one request to the next, and the split is
+  ignored with a warning in the server log. Leave unset and, for peers the server
   picked itself next to one local GPU, the server fills the local GPU first
   and puts only the rest on peers (largest free memory first); anything else
   gets llama-server's own `--fit` split from live free memory.

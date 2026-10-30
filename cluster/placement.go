@@ -1,7 +1,9 @@
 package cluster
 
 import (
+	"encoding/binary"
 	"fmt"
+	"io"
 	"log/slog"
 	"math"
 	"net"
@@ -10,9 +12,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/borism/ollama-cluster/api"
 	"github.com/borism/ollama-cluster/envconfig"
+	"github.com/borism/ollama-cluster/format"
 	"github.com/borism/ollama-cluster/ml"
 )
 
@@ -128,6 +132,7 @@ func SelectRPCServers(gpus []ml.DeviceInfo, predicted uint64, peers []Peer, opts
 	if opts.RPCServers != "" {
 		return opts
 	}
+	opts = ignoreTensorSplit(opts)
 
 	local := localAvailable(gpus)
 	if local >= predicted {
@@ -140,13 +145,19 @@ func SelectRPCServers(gpus []ml.DeviceInfo, predicted uint64, peers []Peer, opts
 			usable = append(usable, p)
 		}
 	}
-	if len(usable) == 0 {
-		return opts
-	}
 
 	policy := opts.RPCPlacement
 	if policy == "" {
 		policy = envconfig.ClusterPlacement()
+	}
+	// One line per decision, so a peer that was left out can be explained.
+	defer func() {
+		slog.Info("cluster: placement", "predicted", format.HumanBytes2(predicted), "local", format.HumanBytes2(local),
+			"policy", policy, "candidates", describePeers(peers, time.Now()),
+			"rpc_servers", opts.RPCServers, "tensor_split", opts.TensorSplit)
+	}()
+	if len(usable) == 0 {
+		return opts
 	}
 
 	var addrs []string
@@ -162,6 +173,50 @@ func SelectRPCServers(gpus []ml.DeviceInfo, predicted uint64, peers []Peer, opts
 			opts.RPCServers = strings.Join(picked, ",")
 			opts.TensorSplit = split
 		}
+	}
+	return opts
+}
+
+// describePeers is one log field naming every peer placement was handed with
+// its free memory, rpc_port, whether it was usable (and if not, why) and how
+// long ago its last beacon was.
+func describePeers(peers []Peer, now time.Time) string {
+	if len(peers) == 0 {
+		return "none"
+	}
+	parts := make([]string, len(peers))
+	for i, p := range peers {
+		verdict := "usable"
+		switch {
+		case p.RPCPort == 0:
+			verdict = "not sharing (rpc_port 0)"
+		case p.ProtoIncompatibility() != "":
+			verdict = p.ProtoIncompatibility()
+		case peerFreeMemory(p) < minUsefulMemory:
+			verdict = "under 1 GiB free"
+		}
+		age := "unknown"
+		if !p.LastSeen.IsZero() {
+			age = now.Sub(p.LastSeen).Round(100 * time.Millisecond).String()
+		}
+		parts[i] = fmt.Sprintf("%s free=%s rpc_port=%d proto=%d.%d beacon_age=%s: %s",
+			p.Addr, format.HumanBytes2(peerFreeMemory(p)), p.RPCPort, p.ProtoMajor, p.ProtoMinor, age, verdict)
+	}
+	return strings.Join(parts, "; ")
+}
+
+// ignoreTensorSplit drops a caller's TensorSplit when the caller did not also
+// choose RPCServers. llama.cpp maps its entries by device position (peers in
+// --rpc order, then the local GPU), and the peers the server picks, and their
+// order, change with the policy and with each peer's load, so the same split
+// would land on different devices from one request to the next (a "4,6" meant
+// for a peer and the GPU put 60 % on the second peer and nothing on the GPU).
+// It is not applied to a local-only load either (appendRPCArgs).
+func ignoreTensorSplit(opts api.Options) api.Options {
+	if opts.RPCServers == "" && opts.TensorSplit != "" {
+		slog.Warn("cluster: ignoring tensor_split because rpc_servers is not set; it maps to devices by position, which automatic peer selection does not fix",
+			"tensor_split", opts.TensorSplit)
+		opts.TensorSplit = ""
 	}
 	return opts
 }
@@ -292,7 +347,7 @@ func rpcAddr(p Peer) string {
 }
 
 // SelectReachableRPCServers is SelectRPCServers, but checks that every peer
-// it picks accepts a connection on its RPC port first, and picks again
+// it picks answers the RPC handshake (DialRPC) first, and picks again
 // without the ones that don't. llama-server aborts the whole load when it
 // can't reach an --rpc server (ggml-rpc.cpp "Failed to connect"), so a peer
 // that is still beaconing but blocked (firewall, macOS Local Network
@@ -302,11 +357,12 @@ func rpcAddr(p Peer) string {
 //
 // dial is DialRPC in production; it is a parameter so tests don't need real
 // listeners. It runs while the scheduler holds its load lock, which is why
-// it's bounded by probeTimeout.
+// it's bounded by probeTimeout plus rpcHelloTimeout.
 func SelectReachableRPCServers(gpus []ml.DeviceInfo, predicted uint64, peers []Peer, opts api.Options, dial func(addr string) error) api.Options {
 	if opts.RPCServers != "" {
 		return opts
 	}
+	opts = ignoreTensorSplit(opts) // once, not on every round below
 	for {
 		picked := SelectRPCServers(gpus, predicted, peers, opts)
 		if picked.RPCServers == "" {
@@ -336,12 +392,54 @@ func SelectReachableRPCServers(gpus []ml.DeviceInfo, predicted uint64, peers []P
 	}
 }
 
-// DialRPC checks that addr accepts a TCP connection within probeTimeout,
-// the same check probeLoop times for Peer.Latency.
+// rpcHelloTimeout bounds DialRPC's whole exchange. A worker that is up answers
+// in well under a millisecond; one that is busy with another client (the
+// ggml-rpc-server accept loop serves one connection at a time, see
+// rpc_serve_client in ggml/src/ggml-rpc/ggml-rpc.cpp) never does.
+const rpcHelloTimeout = 2 * time.Second
+
+// rpcConnCapsSize is RPC_CONN_CAPS_SIZE (ggml/src/ggml-rpc/transport.h).
+const rpcConnCapsSize = 24
+
+// rpcCmdHello is RPC_CMD_HELLO, pinned to 14 by a static_assert in ggml-rpc.cpp.
+const rpcCmdHello = 14
+
+// DialRPC checks that the ggml-rpc-server at addr is up and speaks our
+// protocol: it connects within probeTimeout and then does the RPC HELLO
+// exchange (client side: negotiate_hello in ggml-rpc.cpp). A bare TCP connect
+// is not enough -- a worker can accept the connection and reset it right away,
+// and llama-server then aborts the load in ggml_backend_rpc_add_server with an
+// error that does not name the peer. Sending no transport capabilities (all
+// zero) keeps the connection plain TCP; the worker just reads HELLO, answers
+// and sees us hang up.
 func DialRPC(addr string) error {
 	conn, err := net.DialTimeout("tcp", addr, probeTimeout)
 	if err != nil {
 		return err
 	}
-	return conn.Close()
+	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(rpcHelloTimeout)); err != nil {
+		return err
+	}
+
+	// | cmd (1) | size (8) | rpc_msg_hello_req: conn_caps (24) |
+	req := make([]byte, 1+8+rpcConnCapsSize)
+	req[0] = rpcCmdHello
+	binary.LittleEndian.PutUint64(req[1:], rpcConnCapsSize)
+	if _, err := conn.Write(req); err != nil {
+		return fmt.Errorf("rpc hello: %w", err)
+	}
+
+	// | size (8) | rpc_msg_hello_rsp: major, minor, patch, padding (4) + conn_caps (24) |
+	rsp := make([]byte, 8+4+rpcConnCapsSize)
+	if _, err := io.ReadFull(conn, rsp); err != nil {
+		return fmt.Errorf("rpc hello: %w", err)
+	}
+	if size := binary.LittleEndian.Uint64(rsp); size != 4+rpcConnCapsSize {
+		return fmt.Errorf("rpc hello: unexpected reply size %d", size)
+	}
+	if major, minor := int(rsp[8]), int(rsp[9]); major != RPCProtoMajor || minor > RPCProtoMinor {
+		return fmt.Errorf("rpc hello: worker speaks protocol %d.%d, this node needs %d.%d", major, minor, RPCProtoMajor, RPCProtoMinor)
+	}
+	return nil
 }
