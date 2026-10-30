@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/borism/ollama-cluster/app/version"
 )
 
 func TestDoUpgrade(t *testing.T) {
@@ -228,6 +230,36 @@ func TestDoUpgradeAtStartup(t *testing.T) {
 	}
 	if _, err := os.Stat(bundle); err == nil {
 		t.Fatalf("unverified bundle still exists %s", bundle)
+	}
+}
+
+func TestGetStagedUpdateSkipsNotNewer(t *testing.T) {
+	oldVersion := version.Version
+	t.Cleanup(func() { version.Version = oldVersion })
+	version.Version = "0.40.11-cluster.1"
+	UpdateStageDir = t.TempDir()
+	bundle := filepath.Join(UpdateStageDir, "etag", "Ollama-darwin.zip")
+	if err := os.MkdirAll(filepath.Dir(bundle), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		staged string
+		keep   bool
+	}{
+		{"0.40.11", false}, // stock Ollama of the same upstream release
+		{"0.40.11-cluster.1", false},
+		{"0.40.8-cluster.1", false},
+		{"0.40.11-cluster.2", true},
+	} {
+		plist := "<plist version=\"1.0\">\n<dict>\n\t<key>CFBundleShortVersionString</key>\n\t<string>" + c.staged + "</string>\n</dict>\n</plist>\n"
+		if err := zipCreationHelper(bundle, []testPayload{{Name: "Ollama.app/Contents/Info.plist", Body: []byte(plist)}}); err != nil {
+			t.Fatal(err)
+		}
+		got := getStagedUpdate()
+		_, err := os.Stat(bundle)
+		if (got == bundle) != c.keep || (err == nil) != c.keep {
+			t.Errorf("staged %s over %s: got %q, file kept %v, want kept %v", c.staged, version.Version, got, err == nil, c.keep)
+		}
 	}
 }
 
