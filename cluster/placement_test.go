@@ -1,8 +1,11 @@
 package cluster
 
 import (
+	"encoding/binary"
 	"errors"
+	"io"
 	"math"
+	"net"
 	"sync"
 	"testing"
 	"time"
@@ -344,5 +347,61 @@ func TestSelectRPCServersFillsLocalFirst(t *testing.T) {
 	got = SelectRPCServers([]ml.DeviceInfo{gpu(18125), gpu(18125)}, mib(60000), peers, api.Options{})
 	if got.TensorSplit != "" {
 		t.Fatalf("multi-GPU: split %q, want none", got.TensorSplit)
+	}
+}
+
+// fakeRPCWorker listens on localhost and runs serve for each accepted
+// connection; it returns the address to dial.
+func fakeRPCWorker(t *testing.T, serve func(net.Conn)) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("no localhost listener: %v", err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				serve(c)
+			}()
+		}
+	}()
+	return ln.Addr().String()
+}
+
+// helloReply answers a HELLO the way rpc_serve_client does.
+func helloReply(c net.Conn, major, minor byte) {
+	req := make([]byte, 1+8+rpcConnCapsSize)
+	if _, err := io.ReadFull(c, req); err != nil || req[0] != rpcCmdHello {
+		return
+	}
+	rsp := make([]byte, 8+4+rpcConnCapsSize)
+	binary.LittleEndian.PutUint64(rsp, 4+rpcConnCapsSize)
+	rsp[8], rsp[9] = major, minor
+	c.Write(rsp)
+}
+
+// TestDialRPC: a worker that accepts the TCP connection and then resets it
+// (or hangs up, or speaks another protocol) must not pass the check, because
+// llama-server aborts the whole load on it without naming the peer (#70).
+func TestDialRPC(t *testing.T) {
+	healthy := fakeRPCWorker(t, func(c net.Conn) { helloReply(c, RPCProtoMajor, RPCProtoMinor) })
+	if err := DialRPC(healthy); err != nil {
+		t.Errorf("healthy worker: %v", err)
+	}
+
+	resets := fakeRPCWorker(t, func(c net.Conn) { c.(*net.TCPConn).SetLinger(0) }) // close sends RST
+	hangsUp := fakeRPCWorker(t, func(c net.Conn) {})
+	oldMajor := fakeRPCWorker(t, func(c net.Conn) { helloReply(c, RPCProtoMajor-1, 0) })
+	newerMinor := fakeRPCWorker(t, func(c net.Conn) { helloReply(c, RPCProtoMajor, RPCProtoMinor+1) })
+	for name, addr := range map[string]string{"reset": resets, "hang up": hangsUp, "other major": oldMajor, "newer minor": newerMinor} {
+		if err := DialRPC(addr); err == nil {
+			t.Errorf("%s: DialRPC passed, want an error", name)
+		}
 	}
 }
