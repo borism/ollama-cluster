@@ -8,6 +8,9 @@ on:
   pull_request:
     paths:
       - 'LLAMA_CPP_VERSION'
+  # On-demand run of darwin-build alone on the ephemeral Tart runner
+  # (docs/mac-ci-runner-setup.md): gh workflow run test-llamacpp-update.yaml --ref <branch>
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -38,7 +41,12 @@ jobs:
           } >>"${GITHUB_OUTPUT}"
 
   darwin-build:
-    runs-on: macos-26-xlarge
+    # SECURITY: this repo is public -- the "tart-ephemeral" self-hosted label
+    # must never be attached to a pull_request job (a fork PR could run
+    # arbitrary code on that Mac). It is selected only for workflow_dispatch,
+    # which needs push access; every other event keeps the GitHub-hosted
+    # runner. See release.yaml darwin-build and docs/mac-ci-runner-setup.md.
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && fromJSON('["self-hosted","macOS","tart-ephemeral"]') || 'macos-26-xlarge' }}
     needs: setup-environment
     env:
       GOFLAGS: ${{ needs.setup-environment.outputs.GOFLAGS }}
@@ -73,6 +81,7 @@ jobs:
   # filesystem artifacts below. This preserves parallelism without Docker
   # registry credentials or oversized GitHub layer caches.
   linux-payloads:
+    if: github.event_name != 'workflow_dispatch' # dispatch is darwin-build only
     runs-on: ${{ matrix.arch == 'arm64' && 'linux-arm64' || 'linux' }}
     needs: setup-environment
     strategy:
@@ -138,6 +147,7 @@ jobs:
           compression-level: 0
 
   linux-go:
+    if: github.event_name != 'workflow_dispatch' # dispatch is darwin-build only
     runs-on: ${{ matrix.arch == 'arm64' && 'linux-arm64' || 'linux' }}
     needs: setup-environment
     strategy:
@@ -290,6 +300,7 @@ jobs:
           compression-level: 0
 
   windows-depends:
+    if: github.event_name != 'workflow_dispatch' # dispatch is darwin-build only
     needs: setup-environment
     strategy:
       fail-fast: false
@@ -472,6 +483,7 @@ jobs:
           compression-level: 0
 
   windows-build:
+    if: github.event_name != 'workflow_dispatch' # dispatch is darwin-build only
     runs-on: windows
     needs: setup-environment
     env:

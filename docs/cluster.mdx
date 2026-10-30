@@ -256,6 +256,19 @@ real free-memory numbers, how many layers fit across local GPU(s) + every
 RPC peer + CPU combined — the same layer-placement logic that already runs
 with zero cluster peers.
 
+### Which peers get weights
+
+With one local GPU, the server does not leave the split to llama-server's
+default, which is proportional to each device's free memory and so puts
+weights on a slow peer just because it has room. It fills the local GPU
+first (keeping 3 GiB back for compute buffers and the CUDA/Metal context),
+then the candidate peers largest-free-memory first, and passes the result as
+`--tensor-split`. A peer that would get nothing is left out of `--rpc`. If
+the model doesn't fit the devices at all, or the host has no GPU, an
+integrated GPU, or more than one GPU, the split stays llama-server's own. A
+load that runs out of memory with a computed split is retried once without
+it. Measurements: [Cluster benchmarks](/cluster-benchmarks).
+
 One deliberate exception: a peer with less than 1 GiB of spare memory is
 skipped entirely, even if it could hold a layer or two — not worth a
 network hop for that little. That slice goes to CPU too.
@@ -304,7 +317,7 @@ wins over the saved value; `ollama cluster status` shows which one applies.
 | `OLLAMA_CLUSTER_PORT` | `11435` | UDP port used for discovery beacons. Must match across a fleet if changed. |
 | `OLLAMA_CLUSTER_SHARE_DEVICES` (`cluster_share_devices`) | all | Comma-separated ggml device names (`CUDA1`, `Vulkan0`) to share instead of every accelerator, passed to the worker as `-d` and the only devices peers see. |
 | `OLLAMA_CLUSTER_SEEDS` (`cluster_seeds`) | none | Comma-separated `host:port` list of peers to unicast directly to, for reaching machines outside this host's broadcast domain (a different subnet or VLAN — broadcast discovery doesn't cross those). Not needed on a flat LAN. |
-| `OLLAMA_CLUSTER_PLACEMENT` (`cluster_placement`) | `waterfill` | How peers are chosen when more than one has spare capacity: `waterfill` weighs peers by measured load and latency and can spread a shortfall across several; `greedy` instead just ranks by free memory and adds peers until the shortfall's covered. |
+| `OLLAMA_CLUSTER_PLACEMENT` (`cluster_placement`) | `waterfill` | How candidate peers are chosen when more than one has spare capacity: `waterfill` weighs peers by measured load and latency and considers every usable one; `greedy` instead just ranks by free memory and adds peers until the shortfall's covered. With one local GPU, the model is then laid out local-first (see "Which peers get weights" below), so a candidate that isn't needed gets nothing and is dropped. |
 | `OLLAMA_CLUSTER_CACHE_GB` (`cluster_cache_gb`) | unset (no cap) | Cap on the tensor cache a sharing machine keeps in `~/.ollama/models/rpc/`: weights peers loaded onto it, so loading the same model again skips the network. Unset, the cache grows until the disk is down to its free-space floor, 5% of the volume, but never under 10 GiB or over 15 GiB; set, it is also held to that many GB. Either way the oldest files go first, checked every minute, and files that don't match their hash (a write cut short) are deleted. If the free space can't be read, an unset cap is treated as 32 GB for that check. A big download (`ollama pull`) that outruns the check can still use up the floor. `0` turns the cache off. |
 
 ## Per-request overrides
@@ -338,8 +351,10 @@ peers actually got used:
   gets (llama-server's `--tensor-split`). Note the device order: since
   Ollama never passes `--device`, every RPC peer sorts *before* every local
   GPU, so with one local GPU and one RPC peer, `tensor_split[0]` is the
-  peer and `tensor_split[1]` is local. Leave unset to let llama-server's
-  own `--fit` compute the split from live free memory.
+  peer and `tensor_split[1]` is local. Leave unset and, for peers the server
+  picked itself next to one local GPU, the server fills the local GPU first
+  and puts only the rest on peers (largest free memory first); anything else
+  gets llama-server's own `--fit` split from live free memory.
 
 ## Security
 

@@ -308,6 +308,28 @@ runner page (valid for an hour):
 ssh <mac> "REG_TOKEN=$(gh api repos/borism/ollama-cluster/actions/runners/registration-token --method POST --jq .token) ./scripts/mac-ci/ephemeral-darwin-runner.sh"
 ```
 
+## Running the llama.cpp bump check on this runner
+
+`test-llamacpp-update.yaml` runs `darwin-build` on GitHub's paid
+`macos-26-xlarge` for every `pull_request` touching `LLAMA_CPP_VERSION`. To
+run that same build on the Tart runner instead, dispatch the workflow by hand
+(it then runs only `darwin-build`, not the Linux/Windows jobs):
+
+```shell
+# 1. on the Mac: start the ephemeral runner (blocks until it has run one job)
+scripts/mac-ci/ephemeral-darwin-runner.sh
+# 2. from anywhere with push access:
+gh workflow run test-llamacpp-update.yaml -R borism/ollama-cluster --ref <branch>
+gh run watch -R borism/ollama-cluster
+```
+
+Start the runner first or right after dispatching; the job waits for a
+`tart-ephemeral` runner to appear. The workflow file must already exist on
+the default branch (`main`) for `gh workflow run` to find it, but `--ref`
+then builds whatever branch you name. Pull request runs are unchanged: they
+always use the GitHub-hosted runner, never the self-hosted label (see the
+security note above).
+
 ## Rebuilding the golden image later
 
 - **Project layer only** (a new Node or Vulkan SDK): `tart clone

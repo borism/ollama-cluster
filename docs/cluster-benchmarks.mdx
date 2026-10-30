@@ -73,11 +73,12 @@ load. The number above is the retest.
 
 ³ `granite4.2:30b` is the only model with a context-dependent cliff, and
 it's specific to **greedy**: greedy holds ~18.5 tok/s at 4K/32K then drops to
-7.84 at 128K, while waterfill stays flat around 8 tok/s the whole way —
-larger KV cache at 128K forces a different, worse single/few-peer layer
-split under greedy, and waterfill's wider split has nowhere further to
-fall. Every other model in this table holds its cluster throughput roughly
-steady from 4K through 128K under both strategies.
+7.84 at 128K, while waterfill stays flat around 8 tok/s the whole way. The
+[placement study](#placement-study-october-2026) below traced it: at 128K greedy
+adds the third (slowest) device, exactly where its VRAM estimate passes what two
+devices hold, and waterfill always had that device. Every other model in this
+table holds its cluster throughput roughly steady from 4K through 128K under
+both strategies.
 
 ⁴ `deepseek-r1:70b` is 39.6 GB (Q4_K_M) — it doesn't fit any single fleet
 machine's memory, so the CPU-only baseline (`num_gpu: 0`, all-local) isn't
@@ -129,7 +130,9 @@ algorithm room to choose differently — both converge on the same two-peer,
   hop costs (`qwen3-coder:30b` at 32K: 60.24 vs 49.91) or when greedy's
   narrower split hits a KV-cache wall that waterfill's wider one doesn't
   (`granite4.2:30b` at 128K, footnote ³). Neither strategy is a safe default
-  across this whole model set.
+  across this whole model set. The [placement study](#placement-study-october-2026)
+  below found that the gap is mostly the slowest member of the peer list, and
+  replaces the free-memory split with a local-first fill.
 
 ## Known exception: `qwen3.8:27b`
 
@@ -169,26 +172,281 @@ this reads as transient allocation pressure/fragmentation under a large
 (131072-token) context rather than a hard resource wall — not chased
 further.
 
+## Placement study, October 2026
+
+Everything above compares `greedy` and `waterfill` with one run per cell. This
+section measures what actually decides the result: which devices hold weights,
+and how many. It answers
+[#11](https://github.com/borism/ollama-cluster/issues/11) (why greedy usually
+beats waterfill) and
+[#66](https://github.com/borism/ollama-cluster/issues/66) (the default split
+ignores device speed).
+
+### Setup
+
+| Node | Role | Device |
+|---|---|---|
+| Head (Linux) | head | NVIDIA RTX A4500, 20 GB (17.7 GB free) |
+| M2 Max Mac | peer | Metal, 32 GB unified (26.8 GB reported) |
+| MacBook Air | peer | Metal, 16 GB unified (12.7 GB reported) |
+| Intel MacBook Pro | peer, other subnet, pinned by `rpc_servers` | Vulkan on an AMD Radeon Pro, 8 GB |
+
+`0.40.11-cluster.1`, RPC protocol 8.0.1, the Macs about 0.5 Gbit/s and 0.7 ms from the head.
+To get models that overflow the A4500 by more than a few GiB, three q8_0 builds
+were pulled from the registry (`qwen3.8:27b-q8_0`, `gemma4:31b-it-q8_0`,
+`nemotron-3.5-lightning:30b-a3b-q8_0`, 99 GB).
+The head ran with `OLLAMA_FLASH_ATTENTION=1` and `OLLAMA_KV_CACHE_TYPE=q4_0`.
+Every cell is one model load, one discarded warm-up request, then three timed
+requests per prompt: a 30-token prompt (generation speed) and a 5,200-token
+prompt (prompt speed, generation after a long prompt). `temperature` 0, `seed`
+42, 128 generated tokens, `num_ctx` 8192 unless a row says otherwise. Peers were
+pinned with `rpc_servers` and the split set with `tensor_split` (peers first,
+then the local GPU), except the rows marked "auto". The per-device split is read
+from llama-server's `load_tensors` / `KV buffer` lines. **±** is the population
+standard deviation of the three requests of one load: it does not include
+load-to-load variation, which is larger. Loading the same configuration twice
+(a pinned "default" cell and an "auto greedy" cell) gave short-prompt generation
+speeds within 0-1 % for gemma4 and granite4.2 and flint, and after the 5k
+prompt flint differed by 8 % (36.7 vs 39.7). In all: 92 model loads and 411
+timed requests; 20 requests failed (see the end).
+
+### How fast is each device, as seen from the head
+
+The whole of `qwen3.5:9b` (Q4_K_M, 6.6 GiB) on one device (`tensor_split "1,0"`
+or the local GPU alone), 3 requests each:
+
+| Device | Memory bandwidth (spec) | Generation tok/s | Prompt tok/s (5k) |
+|---|---|---|---|
+| A4500, local | 640 GB/s | 76.1 ± 0.5 | 2,560 ± 790 (3,117 steady) |
+| M2 Max, over RPC | 400 GB/s | 26.3 ± 0.8 | 422 ± 6 |
+| MacBook Air, over RPC | 68-100 GB/s | 8.7 ± 0.1 | 105 ± 3 |
+
+Per byte, the M2 Max is 2.9x slower than the local GPU for generation and 7x
+for prompt processing, the Air 8x and 29x. The spec-sheet bandwidth ratio
+(1.6x for the M2 Max) understates the M2 Max by almost half, because every peer
+also costs a roughly constant 20-30 ms per generated token: a 3.3 GB model
+(`qwen3.5:4b`) generates at 29 tok/s on the M2 Max, the 7.1 GB model at 27, while
+bandwidth alone would predict 2x apart. The Intel MacBook Pro runs
+`qwen3.5:4b` at 5.1 ± 0.5 tok/s and about 13 prompt tok/s, slower than the Air,
+and with the free-memory default split it was handed 10.2 GiB of
+`gemma4:31b-it-qat`: 1.1 tok/s, against 4.4 ± 0.5 when the A4500 took 85 % and
+the Intel MacBook Pro 2.5 GiB (and 14.6 with the M2 Max instead).
+
+### Why waterfill loses: the extra device
+
+llama.cpp splits layers in proportion to each device's free memory. Waterfill
+lists every usable peer, so the MacBook Air always gets about a fifth of the
+weights, and it is the slowest device in the fleet. Greedy stops at the M2 Max.
+Same model, same context, only the peer list differs:
+
+| Model | Peers | Weights GiB (A4500 / M2 / Air) | Generation tok/s | Prompt tok/s |
+|---|---|---|---|---|
+| gemma4:31b-it-qat | M2 (greedy) | 7.2 / 9.2 / - | 14.6 ± 0.2 | 155 ± 11 |
+| gemma4:31b-it-qat | M2 + Air (waterfill) | 5.7 / 7.4 / 3.3 | 6.8 ± 0.0 | 67 ± 0 |
+| flint:40b-a2b (MoE) | M2 (greedy) | 9.4 / 13.7 / - | 43.8 ± 0.5 | 926 ± 13 |
+| flint:40b-a2b (MoE) | M2 + Air (waterfill) | 7.5 / 10.3 / 5.3 | 30.9 ± 0.5 | 362 ± 141 |
+
+Auto-selected `greedy` and `waterfill` and the same lists pinned by hand gave the
+same splits and speeds. Adding the Air costs 2.1x on the dense model, 1.4x on
+the MoE (a MoE reads few bytes per token, so a slow device hurts less). On
+this fleet that is the whole greedy-versus-waterfill gap, and it is not a
+property of the algorithms but of what they put on the slowest member.
+
+A split by speed does not fix it, and a split that leaves the Air empty costs
+nothing:
+
+| 3 devices, A4500 + M2 Max + Air | gemma4:31b-it-qat | flint:40b-a2b |
+|---|---|---|
+| default (free memory) | 6.8 ± 0.0 | 31.2 ± 0.2 |
+| proportional to measured speed (68 / 24 / 8 % for gemma4, 62 / 30 / 8 % for flint) | 9.4 ± 0.1 | 37.3 ± 1.9 |
+| A4500 as full as fits, Air listed but empty | 16.9 ± 0.1 | 53.8 ± 2.1 |
+| A4500 as full as fits, M2 Max the rest (Air not listed) | 16.8 ± 0.0 | 52.5 ± 4.3 |
+
+Speed-proportional shares are the wrong shape for a layer split: layers run one
+after another for a single request, so time is the sum over devices of
+bytes / speed, not the maximum, and the sum is smallest when the fastest device
+is filled first. Every peer also adds its fixed per-token cost.
+
+### The split on the A4500 + M2 Max pair
+
+Generation tok/s (after the 5,200-token prompt in brackets) as the A4500's
+share of the weights rises. "Default" is llama.cpp's free-memory split (A4500
+41-44 %).
+
+| Model | Default | 50 % | 60 % | 75 % | 85-90 % | A4500 alone (rest on CPU) |
+|---|---|---|---|---|---|---|
+| gemma4:31b-it-qat | 14.6 (12.3) | - | 15.9 (13.7) | 16.4 (15.0) | 16.8 (14.9) | 14.4, then CUDA out of memory on the 5k prompt |
+| granite4.2:30b | 19.3 (17.0) | - | 21.4 (18.9) | 21.0 (19.7) | 22.9 (20.1) | 20.3 (17.9) |
+| flint:40b-a2b | 44.0 (36.7) | 50.5 (44.2) | 52.5 (50.3), 62 % is the most the A4500 holds | - | - | 19.5 (43.5), experts on CPU, spread 3 and 15 tok/s |
+
+Generation rises with the A4500's share up to what fits, for every model (granite4.2's
+60 % and 75 % points are 0.4 tok/s apart the wrong way, inside the noise); the
+sweeps never found an interior optimum. Prompt processing moves
+more than generation (gemma4: 160 to 359 tok/s, granite4.2: 186 to 496)
+because prompt processing sends activations over the network for every layer
+that crosses a device boundary and the peers' GPUs are far slower at it.
+
+The shortfall decides how much there is to gain. When the model needs most of
+the M2 Max anyway, the default is already close to "fill the GPU":
+`nemotron-3.5-lightning:30b-a3b-q8_0` (32.6 GiB) splits 13.6 / 18.6 GiB by
+default and 13.6 / 18.6 with the fill, 74.0 vs 73.6 tok/s.
+
+### The fill rule, end to end
+
+`cluster.fillSplit` fills the local GPU (minus a 3 GiB margin for compute
+buffers and the CUDA context), then peers largest-free-memory first, and drops
+a peer that gets nothing. These are the splits it computes for each model on
+this fleet, pinned and run (three requests each, `tensor_split` as computed):
+
+| Model | GiB | Default gen / prompt | `fillSplit` gen / prompt | Local only gen / prompt |
+|---|---|---|---|---|
+| granite4.2:30b | 16.5 | 19.2 ± 0.1 / 203 | 20.5 ± 0.4 / 398 | 20.3 ± 1.6 / 705 |
+| qwen3.6:35b-a3b | 20.2 | 66.8 ± 3.7 / 713 | 73.7 ± 0.7 / 863 | 59.7 ± 4.8 / 606 |
+| flint:40b-a2b | 24.2 | 43.8 ± 0.5 / 926 | 61.5 ± 1.8 / 976⁵ | 19.5 ± 3.1 / 294 |
+| nemotron-3.5-lightning | 23.7 | 77.8 ± 2.3 / 666 | 76.5 ± 2.8 / 772 | 47.5 ± 0.3 / 344 |
+| qwen3.8:27b-q8_0 | 27.1 | 13.2 ± 0.0 / 206 | 13.7 ± 0.0 / 234 | 3.6 ± 0.0 / 226 |
+| gemma4:31b-it-q8_0 | 30.4 | 9.8 ± 0.0 / 162 | 9.9 ± 0.1 / 181 | 2.4 ± 0.0 / 143 |
+| nemotron-3.5-lightning q8_0 | 32.6 | 74.0 ± 3.8 / 717 | 73.6 ± 3.1 / 711 | 8.1 ± 1.4 / 36 |
+
+⁵ with the 5k prompt, 41.9 ± 1.5 against 39.7 ± 2.3 for the default and 50.3 for the
+hand-picked 62 % cell: flint's long-prompt generation varied by 10 tok/s between
+loads of near-identical splits. Treat flint's gain as real but of uncertain size.
+
+What this says, and does not:
+
+- The fill never lost to the default beyond noise, and gained 0-40 % generation
+  and -1 to +96 % prompt speed on the M2 Max pair. (Seven models: with the
+  corrected KV estimate, `gemma4:31b-it-qat` and `qwen3.8:27b` are judged to
+  fit the A4500 alone, so the code no longer asks the cluster about them; their
+  hand-picked rows are above.) The gain is largest for dense
+  models whose weights barely exceed the A4500 and zero when the model is so
+  large that both splits come out the same.
+- **Models that nearly fit locally were as fast, or faster, on the A4500 alone
+  with a few layers on the CPU**: granite4.2 (2 of 65 layers on CPU) generated
+  20.3 vs 20.5 and prompt-processed 3.5x faster; qwen3.8:27b (2 of 66) 27-32 vs
+  34 and 4x faster. A spill of a few percent is cheaper than a network hop on
+  every layer boundary. The cluster only clearly wins from about 10 % of the model
+  on the CPU (gemma4 q4: 14.4 vs 16.8; the q8 models: 2-4 vs 10-14). Placement
+  still sends the shortfall to peers whenever the estimate does not fit
+  locally; a "spill threshold" is a follow-up, with only four models behind it.
+
+### Long context, and how KV cache enters (#11)
+
+**KV is accounted for.** `llm.PredictServerVRAM` adds a KV term
+(`2 * layers * kv_heads * head_dim * num_ctx * 2 bytes`), greedy compares the
+running total against it, and `--fit` re-checks with real buffers at load time.
+The working theory in #11 (greedy does not account for the KV cache) is refuted.
+What the estimate got wrong was the 2 bytes: it counted every cache as f16,
+whatever `OLLAMA_KV_CACHE_TYPE` said.
+
+`granite4.2:30b` (16.5 GiB, 64 layers, 8 KV heads) on the head with a q4_0 cache,
+greedy auto-selection, peers pinned afterwards for the speed:
+
+| `num_ctx` | Estimate (f16 KV) | Real KV (q4_0) | Peers greedy chose | Generation tok/s |
+|---|---|---|---|---|
+| 4,096 | 17.5 GiB | 0.3 GiB | M2 | 19.1 |
+| 32,768 | 24.5 GiB | 2.3 GiB | M2 | 19.3 (12.8 after a 22k-token prompt) |
+| 131,072 | 48.5 GiB | 9.0 GiB | **M2 + Air** | the load aborted (the Air's RPC worker was down); M2 alone: 13.3 ± 1.4 |
+
+The list flips exactly where the estimate passes what the A4500 and M2 Max can
+hold (17.2 + 25 GiB). With a real 9 GiB cache the model needs 26 GiB and the
+two fit with room to spare, so the third device was added for nothing, at a
+cost of 1.4-2.1x (see "Why waterfill loses"; the 128K row of the first table,
+7.84 tok/s, looks like the same effect). Estimate, real KV and tok/s with the cache type varied and everything
+else fixed (granite4.2:30b, A4500 + M2 Max pinned, default split):
+
+| KV cache | `num_ctx` | Real KV | Estimate | Where it ran | Generation tok/s (22k-token prompt) |
+|---|---|---|---|---|---|
+| f16 | 32,768 | 8.0 GiB | 24.5 GiB | all on GPUs | 20.3 ± 0.0 (15.1 ± 0.5) |
+| q8_0 | 32,768 | 4.3 GiB | 24.5 GiB | all on GPUs | 19.5 ± 0.0 (13.1 ± 0.2) |
+| q4_0 | 32,768 | 2.3 GiB | 24.5 GiB | all on GPUs | 19.1 ± 0.3 (12.8 ± 0.3) |
+| f16 | 131,072 | 32.0 GiB | 48.5 GiB | **13 of 65 layers on CPU** | 7.7 ± 0.0 (5.2 ± 0.2 after 5k) |
+| q8_0 | 131,072 | 17.0 GiB | 48.5 GiB | all on GPUs | 18.7 ± 0.0 (16.8 ± 0.2 after 5k) |
+| q4_0 | 131,072 | 9.0 GiB | 48.5 GiB | all on GPUs | 13.3 ± 1.4 (15.9 ± 0.5 after 5k) |
+
+So the cliff has two sources, and which one you hit depends on the cache type:
+with an f16 cache at 128K the model really needs about 49 GiB, which is more
+than the A4500 and the M2 Max together; a third device, or the CPU, is
+unavoidable and the run is slow whichever you pick (7.7 tok/s on CPU spill).
+With a q8_0 or q4_0 cache it fits and the estimate adds the Air regardless.
+Generation speed itself barely depends on the cache type when everything fits
+(19.1-20.3 at 32K); quantized caches cost 13-15 % after a very long prompt.
+The benchmark above did not record its cache type; both stories fit its 7.84.
+
+`PredictServerVRAM` now scales the KV term by the cache type (f16 2, q8_0 1.0625,
+q4_0 0.5625 bytes per element), which removes the spurious Air at 128K for q8_0
+and q4_0 caches. Still counted wrongly, not changed here: sliding-window layers,
+recurrent (SSM) layers, and `key_length` differing from `embedding / heads`.
+
+One more KV-related check came back clean: `gpt-oss:20b` (12.9 GiB) at 8K, 32K and
+131K contexts stayed on the A4500 alone (108.5, 104.9, 108.7 tok/s); the estimate
+did not make it spill for no reason.
+
+At 128K the fill also helps: A4500 50 % (hand-picked) gave 19.9 ± 0.2 against
+13.3 ± 1.4 for the default (+50 %), and the computed split 20.5 ± 0.2
+(18.4 with a 5k prompt). With a 22k-token prompt at 32K context,
+granite4.2 generates 15.7 ± 0.0 with the fill against 12.8 ± 0.3 by default,
+and processes the prompt at 278 against 149 tok/s.
+
+### Recommendation
+
+1. **Fill local-first, peers by free memory, only as many peers as needed**
+   (`cluster.fillSplit`, now the default when the host has one GPU). It is
+   never worse than the default beyond noise on the seven models it applies
+   to, it removes the 1.4-2.1x loss from an unneeded slow peer, and it needs no
+   per-device speed number. The rank "largest free memory first" was right
+   for every pair tested here (A4500 before M2 Max before Air before the
+   Intel MacBook Pro's 8 GB card); a table of memory bandwidth per device name
+   would only matter when a small fast peer sits next to a big slow one.
+2. **A measured speed signal is not needed for this decision.** A bandwidth
+   table mis-predicts the M2 Max by 1.7x because of the fixed per-peer cost;
+   a bench on join would capture it (the `qwen3.5:4b` probe above takes under
+   a minute per peer), but the ranking was already right without either.
+   Worth adding later for deciding whether a peer is worth using at all
+   (the "spill threshold" above), not for splitting.
+3. **Fallback:** llama.cpp's own split (memory-proportional with `--fit`)
+   whenever the layout is not simple: more than one local GPU, an integrated
+   GPU, no GPU, or a model larger than every device together (so `--fit`
+   can spill to CPU). A load that runs out of memory with a computed split
+   is retried once without it.
+
+### What could not be tested, and caveats
+
+- The MacBook Air's RPC worker started resetting connections partway through
+  (about 06:00 on the run day, after it dropped out of discovery once) and did
+  not recover. Every cell that listed it afterwards aborted
+  ("Remote RPC server crashed or returned malformed response"): the 128K
+  three-device row, granite4.2's Air and three-device rows, and the auto-waterfill
+  rows of the later models. The Air-inclusive rows in this section are all from
+  before that.
+- The Intel MacBook Pro is on another subnet and is not discovered; it was
+  pinned by address, and only short prompts were run on it (a 5k prompt takes
+  minutes at 13 tok/s). It would only ever be the last peer.
+- Single head, single run day, one cache type for the cluster cells (q4_0),
+  8K context for most cells. Load-to-load spread was not measured for every
+  cell; see the paragraph under "Setup".
+- The new code was validated by running the exact `tensor_split` it computes
+  (pinned), not by a build of this branch discovering peers: a second instance
+  on the same host cannot receive the UDP beacons the running service binds.
+- The qwen3-coder rows of the older table where waterfill beat greedy were not
+  rerun. A hint that they are noise: the rows quoted in #11 for one cell were 25.9 /
+  60.2 / 45.8 tok/s across three repeats.
+
 ## Open questions
 
-The numbers above raise two things we don't yet have a root cause for:
-
-- **Why greedy usually beats waterfill.** Greedy wins 18 of 24 measured
-  rows, generally by using fewer RPC peers and saving the extra network hop
-  per token — but waterfill wins when spreading layers across peers adds
-  more raw compute than the hop costs, and one model (`granite4.2:30b`) hits
-  a KV-cache-driven cliff under greedy specifically at long context. Our
-  working theory is that greedy's placement heuristic doesn't account for
-  per-request KV cache growth, but we haven't instrumented the placement
-  code to confirm it.
-- **Why the `qwen3.8:27b` cluster runs offloaded 0/66 layers.** A single
-  CUDA box offloads 59/66 layers on the old build and 63/66 on the fixed
-  one (see above), so the cluster result needs a rerun on the fixed build
-  before anyone blames the architecture.
-
-Further testing (varying KV cache size independently of context, and
-rerunning the `qwen3.8` cluster rows on the fixed build) is needed before either can be called
-understood rather than just observed.
+- **Why greedy usually beats waterfill, and the `granite4.2:30b` cliff.**
+  Answered in the [placement study](#placement-study-october-2026): the KV cache
+  is counted (the theory in the first version of this page was wrong), the
+  difference between the strategies is whether the slowest peer holds weights,
+  and the cliff is the estimate adding that peer (spuriously for a quantized
+  cache, for real with f16 at 128K). What is still open is the old table's
+  rows where waterfill won (`qwen3-coder:30b` at 32K and 128K): they were not
+  rerun.
+- **`qwen3.8:27b` cluster runs that offloaded 0/66 layers.** Rerun on the fixed
+  build in the study: 66/66 layers offloaded over the A4500 and the M2 Max,
+  29.8 ± 0.8 tok/s with the default split and 33.7 ± 0.9 with a fuller A4500
+  (27.5-32.2 for the A4500 alone with 2 layers on the CPU). The 0/66 in the old
+  rows is not reproduced on this build; its cause is unknown.
 
 See [`cluster.mdx`](/cluster) for how to enable cluster mode, environment
 variables, and current limitations.

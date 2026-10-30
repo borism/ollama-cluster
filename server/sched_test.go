@@ -2384,3 +2384,22 @@ func TestSchedLoadRetriesWithoutFailedRPCPeer(t *testing.T) {
 		done()
 	}
 }
+
+func TestRetryWithoutFillSplit(t *testing.T) {
+	oom := errors.New("cudaMalloc failed: out of memory")
+	computed := api.Options{Runner: api.Runner{TensorSplit: "9000,14000"}}
+	asked := &LlmRequest{}
+	if !retryWithoutFillSplit(computed, asked, oom) {
+		t.Fatal("computed split + OOM: want retry")
+	}
+	if retryWithoutFillSplit(computed, asked, errors.New("connection refused")) {
+		t.Fatal("not an OOM: want no retry")
+	}
+	if retryWithoutFillSplit(computed, &LlmRequest{noFillSplit: true}, oom) {
+		t.Fatal("already retried: want no second retry")
+	}
+	same := &LlmRequest{opts: computed}
+	if retryWithoutFillSplit(computed, same, oom) {
+		t.Fatal("split came from the request: want no retry")
+	}
+}

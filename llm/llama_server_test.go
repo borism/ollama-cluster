@@ -4104,3 +4104,249 @@ func TestLlamaServerCompletionThinkingFormat(t *testing.T) {
 		t.Errorf("json format converted a schema, %d conversions", got)
 	}
 }
+
+// TestKVBytesPerElement: PredictServerVRAM used to count every KV cache as
+// f16, so a q4_0 cache at 128K context looked 3.5x bigger than it is and made
+// cluster placement add a peer the model never needed.
+func TestKVBytesPerElement(t *testing.T) {
+	for _, c := range []struct {
+		cacheType string
+		want      float64
+	}{{"", 2}, {"f16", 2}, {"q8_0", 1.0625}, {"Q4_0", 0.5625}} {
+		if got := kvBytesPerElement(c.cacheType); got != c.want {
+			t.Errorf("kvBytesPerElement(%q) = %v, want %v", c.cacheType, got, c.want)
+		}
+	}
+}
+
+// TestPredictKVCache checks the KV and recurrent-state estimate against shapes
+// of real models (the MiB figures are llama-server's "KV buffer size" and
+// "RS buffer size" lines at n_ctx 8192 with a q4_0 cache, or as noted) and the
+// plain formula for a model with none of the newer keys.
+func TestPredictKVCache(t *testing.T) {
+	const mib = 1 << 20
+	// repeat builds a per-layer array from a repeating pattern.
+	repeat := func(n int, pattern ...any) []any {
+		out := make([]any, n)
+		for i := range out {
+			out[i] = pattern[i%len(pattern)]
+		}
+		return out
+	}
+	uints := func(vs []any) []uint32 {
+		out := make([]uint32, len(vs))
+		for i, v := range vs {
+			out[i] = v.(uint32)
+		}
+		return out
+	}
+	bools := func(vs []any) []bool {
+		out := make([]bool, len(vs))
+		for i, v := range vs {
+			out[i] = v.(bool)
+		}
+		return out
+	}
+	// nemotron_h_moe shape: 52 layers plus one next-token-prediction layer, six
+	// attention layers, the others moe (ffn) or mamba (no ffn).
+	nemotronHeads := make([]uint32, 53)
+	nemotronFFN := make([]uint32, 53)
+	mamba := 0
+	for i := range nemotronHeads {
+		switch {
+		case i == 5 || i == 12 || i == 19 || i == 26 || i == 33 || i == 42 || i == 52:
+			nemotronHeads[i] = 2
+		case i%2 == 1:
+			nemotronFFN[i] = 1856
+		case i < 52:
+			mamba++
+		}
+	}
+
+	for _, c := range []struct {
+		name      string
+		kv        gguftest.KV
+		numCtx    int
+		cacheType string
+		want      float64 // bytes
+	}{
+		{
+			// No key_length, no pattern: 2 * layers * kv_heads * head_dim * ctx * 2 bytes.
+			name: "fallback plain attention",
+			kv: gguftest.KV{
+				"general.architecture": "llama", "llama.block_count": uint32(32), "llama.embedding_length": uint32(4096),
+				"llama.attention.head_count": uint32(32), "llama.attention.head_count_kv": uint32(8),
+			},
+			numCtx: 8192,
+			want:   2 * 32 * 8 * 128 * 8192 * 2,
+		},
+		{
+			// granite4.2:30b, 64 layers: 576 MiB.
+			name: "fallback granite q4_0",
+			kv: gguftest.KV{
+				"general.architecture": "granite", "granite.block_count": uint32(64), "granite.embedding_length": uint32(4096),
+				"granite.attention.head_count": uint32(32), "granite.attention.head_count_kv": uint32(8),
+			},
+			numCtx: 8192, cacheType: "q4_0",
+			want: 576 * mib,
+		},
+		{
+			// qwen3-coder:30b: key_length 128 is twice embedding_length/head_count (64).
+			name: "key_length and value_length",
+			kv: gguftest.KV{
+				"general.architecture": "qwen3moe", "qwen3moe.block_count": uint32(48), "qwen3moe.embedding_length": uint32(2048),
+				"qwen3moe.attention.head_count": uint32(32), "qwen3moe.attention.head_count_kv": uint32(4),
+				"qwen3moe.attention.key_length": uint32(128), "qwen3moe.attention.value_length": uint32(128),
+			},
+			numCtx: 8192,
+			want:   2 * 48 * 4 * 128 * 8192 * 2,
+		},
+		{
+			// gemma4:31b-it-qat: 10 full layers (4 kv heads, 512) 180 MiB at 8192 cells,
+			// 50 sliding layers (16 kv heads, 256) 337.5 MiB at 1536 cells.
+			name: "sliding window layers",
+			kv: gguftest.KV{
+				"general.architecture": "gemma4", "gemma4.block_count": uint32(60), "gemma4.embedding_length": uint32(5376),
+				"gemma4.attention.head_count":             uint32(32),
+				"gemma4.attention.head_count_kv":          uints(repeat(60, uint32(16), uint32(16), uint32(16), uint32(16), uint32(16), uint32(4))),
+				"gemma4.attention.key_length":             uint32(512),
+				"gemma4.attention.value_length":           uint32(512),
+				"gemma4.attention.key_length_swa":         uint32(256),
+				"gemma4.attention.value_length_swa":       uint32(256),
+				"gemma4.attention.sliding_window":         uint32(1024),
+				"gemma4.attention.sliding_window_pattern": bools(repeat(60, true, true, true, true, true, false)),
+			},
+			numCtx: 8192, cacheType: "q4_0",
+			want: 517.5 * mib,
+		},
+		{
+			// At 128K the sliding layers stay at 1536 cells: 10 * 4 * 1024 * 131072 * 2 bytes
+			// for the full layers plus the same small sliding share as above (f16).
+			name: "sliding window layers at long context",
+			kv: gguftest.KV{
+				"general.architecture": "gemma4", "gemma4.block_count": uint32(60), "gemma4.embedding_length": uint32(5376),
+				"gemma4.attention.head_count":             uint32(32),
+				"gemma4.attention.head_count_kv":          uints(repeat(60, uint32(16), uint32(16), uint32(16), uint32(16), uint32(16), uint32(4))),
+				"gemma4.attention.key_length":             uint32(512),
+				"gemma4.attention.value_length":           uint32(512),
+				"gemma4.attention.key_length_swa":         uint32(256),
+				"gemma4.attention.value_length_swa":       uint32(256),
+				"gemma4.attention.sliding_window":         uint32(1024),
+				"gemma4.attention.sliding_window_pattern": bools(repeat(60, true, true, true, true, true, false)),
+			},
+			numCtx: 131072,
+			want:   (10*4*1024*131072 + 50*16*512*1536) * 2,
+		},
+		{
+			// gemma4:e4b: the last 18 of 42 layers reuse earlier caches.
+			name: "shared kv layers",
+			kv: gguftest.KV{
+				"general.architecture": "gemma4", "gemma4.block_count": uint32(42), "gemma4.embedding_length": uint32(2560),
+				"gemma4.attention.head_count": uint32(8), "gemma4.attention.head_count_kv": uint32(2),
+				"gemma4.attention.key_length": uint32(512), "gemma4.attention.value_length": uint32(512),
+				"gemma4.attention.shared_kv_layers": uint32(18),
+			},
+			numCtx: 8192,
+			want:   2 * 24 * 2 * 512 * 8192 * 2,
+		},
+		{
+			// gpt-oss:20b has a window but no pattern key: even layers slide.
+			// 864 MiB (12 full layers) + 5.0625 MiB (768 cells) at 131072.
+			name: "gptoss alternation",
+			kv: gguftest.KV{
+				"general.architecture": "gptoss", "gptoss.block_count": uint32(24), "gptoss.embedding_length": uint32(2880),
+				"gptoss.attention.head_count": uint32(64), "gptoss.attention.head_count_kv": uint32(8),
+				"gptoss.attention.key_length": uint32(64), "gptoss.attention.value_length": uint32(64),
+				"gptoss.attention.sliding_window": uint32(128),
+			},
+			numCtx: 131072, cacheType: "q4_0",
+			want: 869.0625 * mib,
+		},
+		{
+			// A window without a pattern on any other model stays full attention.
+			name: "window without pattern",
+			kv: gguftest.KV{
+				"general.architecture": "laguna", "laguna.block_count": uint32(40), "laguna.embedding_length": uint32(2048),
+				"laguna.attention.head_count": uint32(48), "laguna.attention.head_count_kv": uint32(8),
+				"laguna.attention.key_length": uint32(128), "laguna.attention.value_length": uint32(128),
+				"laguna.attention.sliding_window": uint32(512),
+			},
+			numCtx: 8192,
+			want:   2 * 40 * 8 * 128 * 8192 * 2,
+		},
+		{
+			// qwen3.8:27b: 64 layers (65 minus the MTP layer), every 4th attends:
+			// 144 MiB KV; 48 recurrent layers * (128*6144 + 3*(6144+2*16*128)) f32 = 149.6 MiB RS.
+			name: "hybrid full_attention_interval",
+			kv: gguftest.KV{
+				"general.architecture": "qwen35", "qwen35.block_count": uint32(65), "qwen35.embedding_length": uint32(5120),
+				"qwen35.attention.head_count": uint32(24), "qwen35.attention.head_count_kv": uint32(4),
+				"qwen35.attention.key_length": uint32(256), "qwen35.attention.value_length": uint32(256),
+				"qwen35.full_attention_interval": uint32(4), "qwen35.nextn_predict_layers": uint32(1),
+				"qwen35.ssm.conv_kernel": uint32(4), "qwen35.ssm.group_count": uint32(16),
+				"qwen35.ssm.inner_size": uint32(6144), "qwen35.ssm.state_size": uint32(128),
+			},
+			numCtx: 8192, cacheType: "q4_0",
+			want: 144*mib + 48*(128*6144+3*(6144+2*16*128))*4,
+		},
+		{
+			// nemotron-3.5-lightning: attention shows up as head_count_kv > 0 in a
+			// per-layer array; 6 layers 13.5 MiB KV, the mamba layers (no ffn) hold state
+			// (the real model has 23 and reports 47.6 MiB per sequence).
+			name: "hybrid per-layer head_count_kv",
+			kv: gguftest.KV{
+				"general.architecture": "nemotron_h_moe", "nemotron_h_moe.block_count": uint32(53), "nemotron_h_moe.embedding_length": uint32(2688),
+				"nemotron_h_moe.attention.head_count": uint32(32), "nemotron_h_moe.attention.head_count_kv": nemotronHeads,
+				"nemotron_h_moe.attention.key_length": uint32(128), "nemotron_h_moe.attention.value_length": uint32(128),
+				"nemotron_h_moe.feed_forward_length": nemotronFFN, "nemotron_h_moe.nextn_predict_layers": uint32(1),
+				"nemotron_h_moe.ssm.conv_kernel": uint32(4), "nemotron_h_moe.ssm.group_count": uint32(8),
+				"nemotron_h_moe.ssm.inner_size": uint32(4096), "nemotron_h_moe.ssm.state_size": uint32(128),
+			},
+			numCtx: 8192, cacheType: "q4_0",
+			want: 13.5*mib + float64(mamba)*(128*4096+3*(4096+2*8*128))*4,
+		},
+		{
+			// MLA caches a latent, so key_length does not apply: old per-head estimate.
+			name: "mla keeps the old estimate",
+			kv: gguftest.KV{
+				"general.architecture": "glm4moelite", "glm4moelite.block_count": uint32(47), "glm4moelite.embedding_length": uint32(2048),
+				"glm4moelite.attention.head_count": uint32(20), "glm4moelite.attention.head_count_kv": uint32(20),
+				"glm4moelite.attention.key_length": uint32(256), "glm4moelite.attention.value_length": uint32(256),
+				"glm4moelite.attention.key_length_mla": uint32(576), "glm4moelite.attention.kv_lora_rank": uint32(512),
+			},
+			numCtx: 8192,
+			want:   2 * 47 * 20 * (2048 / 20) * 8192 * 2,
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("OLLAMA_KV_CACHE_TYPE", c.cacheType)
+			f := loadTestGGUF(t, c.kv)
+			if got := predictKVCache(f.KV(), c.numCtx); float64(got) != c.want {
+				t.Errorf("predictKVCache = %d (%.2f MiB), want %.0f (%.2f MiB)", got, float64(got)/mib, c.want, c.want/mib)
+			}
+		})
+	}
+}
+
+// TestPredictServerVRAMProjector: a projector in its own file adds to the
+// estimate; an inline one is the model file and is already counted.
+func TestPredictServerVRAMProjector(t *testing.T) {
+	path, f := writeTestGGUF(t, gguftest.KV{"general.architecture": "llama"}, nil)
+	projector := filepath.Join(t.TempDir(), "mmproj.gguf")
+	if err := os.WriteFile(projector, make([]byte, 1000), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	size := f.FileSize()
+	for name, c := range map[string]struct {
+		projectors []string
+		want       uint64
+	}{
+		"none":     {nil, size},
+		"separate": {[]string{projector}, size + 1000},
+		"inline":   {[]string{path}, size},
+	} {
+		if got := PredictServerVRAM(path, f, 4096, c.projectors); got != c.want {
+			t.Errorf("%s: PredictServerVRAM = %d, want %d", name, got, c.want)
+		}
+	}
+}
