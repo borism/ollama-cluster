@@ -15,10 +15,12 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"unsafe"
 
+	"github.com/borism/ollama-cluster/app/version"
 	"golang.org/x/sys/unix"
 )
 
@@ -418,13 +420,51 @@ func getStagedUpdate() string {
 		slog.Debug("failed to lookup downloads", "error", err)
 		return ""
 	}
-	if len(files) == 0 {
-		return ""
-	} else if len(files) > 1 {
+	if len(files) > 1 {
 		// Shouldn't happen
 		slog.Warn("multiple update downloads found, using first one", "bundles", files)
 	}
-	return files[0]
+	for _, f := range files {
+		// A superseded download, or a stock Ollama update left in the shared
+		// stage dir, must not replace this build: every caller (startup and
+		// interactive upgrade, verification, the pending-update check) gets
+		// its bundle here.
+		if v := bundleVersion(f); v != "" && !newerRelease(version.Version, v) {
+			slog.Warn("removing staged update that is not newer than this app", "bundle", f, "bundle_version", v, "version", version.Version)
+			_ = os.Remove(f)
+			continue
+		}
+		return f
+	}
+	return ""
+}
+
+var bundleShortVersion = regexp.MustCompile(`<key>CFBundleShortVersionString</key>\s*<string>([^<]*)</string>`)
+
+// bundleVersion returns the CFBundleShortVersionString of a staged update
+// zip, or "" if it can't be read (no Info.plist, or a partial download).
+// ponytail: XML Info.plist only, which is what scripts/build_darwin.sh ships
+// for stock and fork builds alike; a binary plist reads as "" and the bundle
+// is used as before. Parse binary plists if a build ever ships one.
+func bundleVersion(bundle string) string {
+	r, err := zip.OpenReader(bundle)
+	if err != nil {
+		return ""
+	}
+	defer r.Close()
+	f, err := r.Open(updateArchiveRoot + "/Contents/Info.plist")
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	b, err := io.ReadAll(f)
+	if err != nil {
+		return ""
+	}
+	if m := bundleShortVersion.FindSubmatch(b); m != nil {
+		return string(m[1])
+	}
+	return ""
 }
 
 // IsUpdatePending reports whether a downloaded update is waiting to be
