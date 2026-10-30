@@ -2816,26 +2816,117 @@ func (s *llamaServerRunner) MemorySize() (total, vram uint64) {
 }
 
 // PredictServerVRAM estimates VRAM usage for a model without spawning llama-server.
-// Uses model file size as a proxy for weights plus a rough KV cache estimate.
+// Uses model file size as a proxy for weights plus a KV cache estimate from the
+// model metadata (see predictKVCache). Projector files that are separate from the
+// model file are added to the weights.
 // This is intentionally conservative — it overestimates to avoid VRAM contention.
-func PredictServerVRAM(modelPath string, f *gguf.Model, numCtx int) uint64 {
+func PredictServerVRAM(modelPath string, f *gguf.Model, numCtx int, projectors []string) uint64 {
 	weights := modelFileSize(modelPath, f)
-
-	// KV cache: 2 (K+V) * layers * kv_heads * head_dim * context * bytes per
-	// element, at OLLAMA_KV_CACHE_TYPE (f16 counts 2.0, so a q4_0 cache is
-	// 3.5x smaller than it was once counted).
-	layers := f.KV().BlockCount()
-	kvHeads := f.KV().HeadCountKVMin()
-	if kvHeads == 0 {
-		kvHeads = 1
+	for _, p := range projectors {
+		// An inline projector is the model file itself and is already counted.
+		if p != modelPath {
+			weights += modelFileSize(p, nil)
+		}
 	}
+	return weights + predictKVCache(f.KV(), numCtx)
+}
+
+// predictKVCache sizes the context memory the way llama.cpp lays it out per
+// layer (src/llama-hparams.cpp, src/llama-kv-cache-iswa.cpp) instead of
+// treating every layer as full attention:
+//   - head_count_kv may be per layer; a layer with 0 heads has no KV
+//   - key_length/value_length (and the *_swa pair) give the head sizes, falling
+//     back to embedding_length / head_count when absent
+//   - sliding-window layers cache only window+ubatch cells, not the context
+//   - with full_attention_interval n, only every nth layer attends; the rest are
+//     recurrent and keep one fixed-size f32 state per sequence instead
+//   - nextn_predict_layers and shared_kv_layers carry no cache of their own
+//
+// With none of those keys it reduces to the plain
+// 2 * layers * kv_heads * head_dim * context * bytes per element.
+func predictKVCache(kv *gguf.Metadata, numCtx int) uint64 {
+	layers := kv.BlockCount()
+	layers -= min(kv.Uint("nextn_predict_layers"), layers)
+	kvLayers := layers - min(kv.Uint("attention.shared_kv_layers"), layers)
+
 	headDim := uint64(0)
-	if f.KV().HeadCountMax() > 0 {
-		headDim = f.KV().EmbeddingLength() / f.KV().HeadCountMax()
+	if kv.HeadCountMax() > 0 {
+		headDim = kv.EmbeddingLength() / kv.HeadCountMax()
 	}
-	kvCache := uint64(float64(2*layers*kvHeads*headDim*uint64(numCtx)) * kvBytesPerElement(envconfig.KvCacheType()))
+	keyLen, valueLen := kv.Uint("attention.key_length", headDim), kv.Uint("attention.value_length", headDim)
+	keyLenSWA, valueLenSWA := kv.Uint("attention.key_length_swa", keyLen), kv.Uint("attention.value_length_swa", valueLen)
+	if kv.Has("attention.key_length_mla") || kv.Has("attention.kv_lora_rank") {
+		// ponytail: MLA caches a compressed latent, not key_length heads, so it
+		// keeps the old per-head estimate; model it from kv_lora_rank if it matters.
+		keyLen, valueLen, keyLenSWA, valueLenSWA = headDim, headDim, headDim, headDim
+	}
 
-	return weights + kvCache
+	headsPerLayer := uintArray(kv, "attention.head_count_kv")
+	ffnPerLayer := uintArray(kv, "feed_forward_length")
+	interval := kv.Uint("full_attention_interval")
+	window := kv.Uint("attention.sliding_window")
+	swaPattern := kv.KeyValue("attention.sliding_window_pattern").Bools()
+	// ponytail: window + 512 assumes the default ubatch and a single sequence
+	// (llama.cpp adds window per sequence and the auto batch can reach 1024);
+	// the sliding-window share is small, raise it if that ever matters.
+	swaCells := min(uint64(numCtx), (window+512+255)/256*256)
+
+	var kvElements, recurrentLayers uint64
+	for il := range layers {
+		if interval > 0 && (il+1)%interval != 0 {
+			recurrentLayers++
+			continue
+		}
+		heads := max(kv.HeadCountKVMin(), 1)
+		if len(headsPerLayer) > 0 {
+			heads = 0
+			if il < uint64(len(headsPerLayer)) {
+				heads = headsPerLayer[il]
+			}
+		}
+		if heads == 0 {
+			// No attention: a recurrent layer only if it has no feed-forward either
+			// (hybrid models with per-layer arrays such as nemotron_h).
+			if il < uint64(len(ffnPerLayer)) && ffnPerLayer[il] == 0 {
+				recurrentLayers++
+			}
+			continue
+		}
+		if il >= kvLayers {
+			continue
+		}
+		k, v, cells := keyLen, valueLen, uint64(numCtx)
+		// ponytail: the gpt-oss alternation is hard-coded because its GGUF has no
+		// pattern key (llama.cpp src/models/openai-moe.cpp); other models without
+		// one stay full attention, which over-counts.
+		if window > 0 && ((il < uint64(len(swaPattern)) && swaPattern[il]) || (len(swaPattern) == 0 && kv.Architecture() == "gptoss" && il%2 == 0)) {
+			k, v, cells = keyLenSWA, valueLenSWA, min(cells, swaCells)
+		}
+		kvElements += heads * (k + v) * cells
+	}
+
+	// Recurrent state is f32: ssm_states plus the conv states (llama_hparams::n_embd_s/n_embd_r).
+	inner, state, group := kv.Uint("ssm.inner_size"), kv.Uint("ssm.state_size"), kv.Uint("ssm.group_count")
+	stateElements := state * inner
+	if conv := kv.Uint("ssm.conv_kernel"); conv > 0 {
+		stateElements += (conv - 1) * (inner + 2*group*state)
+	}
+	// ponytail: one sequence's state; speculative decoding keeps several, raise
+	// it with the draft's sequence count if that matters.
+	return uint64(float64(kvElements)*kvBytesPerElement(envconfig.KvCacheType())) + recurrentLayers*stateElements*4
+}
+
+// uintArray returns a per-layer key as a slice, or nil when it is a scalar or absent.
+func uintArray(kv *gguf.Metadata, key string) []uint64 {
+	value := kv.KeyValue(key)
+	if values := value.Uints(); len(values) > 0 {
+		return values
+	}
+	var values []uint64
+	for _, n := range value.Ints() {
+		values = append(values, uint64(max(n, 0)))
+	}
+	return values
 }
 
 // kvBytesPerElement is the size of one K or V element for a --cache-type-k/v
