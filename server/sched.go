@@ -612,8 +612,11 @@ func (s *Scheduler) load(req *LlmRequest, systemInfo ml.SystemInfo, gpus []ml.De
 					return req.excludeRPC[fmt.Sprintf("%s:%d", p.Addr, p.RPCPort)]
 				})
 				reqOpts = cluster.SelectReachableRPCServers(gpus, predicted, peers, reqOpts, cluster.DialRPC)
-				if req.noFillSplit {
-					reqOpts.TensorSplit = req.opts.TensorSplit
+				// With peers picked here the request has no usable split of its
+				// own: one it set without rpc_servers was dropped by
+				// cluster.SelectRPCServers and must not be restored.
+				if req.noFillSplit && req.opts.RPCServers == "" {
+					reqOpts.TensorSplit = ""
 				}
 			}
 			loadGpus, launchOpts = selectLlamaServerPlacement(systemInfo, gpus, predicted, reqOpts)
@@ -865,7 +868,7 @@ iGPUScan:
 // server computed (launch differs from what the request asked for) and ran out
 // of memory, and no retry without it has been made yet.
 func retryWithoutFillSplit(launch api.Options, req *LlmRequest, err error) bool {
-	return launch.TensorSplit != req.opts.TensorSplit && !req.noFillSplit && llm.IsOutOfMemory(err)
+	return launch.TensorSplit != "" && launch.TensorSplit != req.opts.TensorSplit && !req.noFillSplit && llm.IsOutOfMemory(err)
 }
 
 var failedRPCConnect = regexp.MustCompile(`Failed to connect to (\S+)`)

@@ -2409,6 +2409,10 @@ func TestRetryWithoutFillSplit(t *testing.T) {
 	if retryWithoutFillSplit(computed, &LlmRequest{noFillSplit: true}, oom) {
 		t.Fatal("already retried: want no second retry")
 	}
+	// A split the request set without rpc_servers was dropped, nothing computed.
+	if retryWithoutFillSplit(api.Options{}, &LlmRequest{opts: computed}, oom) {
+		t.Fatal("no split launched: want no retry")
+	}
 	same := &LlmRequest{opts: computed}
 	if retryWithoutFillSplit(computed, same, oom) {
 		t.Fatal("split came from the request: want no retry")

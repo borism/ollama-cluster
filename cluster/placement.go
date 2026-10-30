@@ -132,6 +132,7 @@ func SelectRPCServers(gpus []ml.DeviceInfo, predicted uint64, peers []Peer, opts
 	if opts.RPCServers != "" {
 		return opts
 	}
+	opts = ignoreTensorSplit(opts)
 
 	local := localAvailable(gpus)
 	if local >= predicted {
@@ -202,6 +203,22 @@ func describePeers(peers []Peer, now time.Time) string {
 			p.Addr, format.HumanBytes2(peerFreeMemory(p)), p.RPCPort, p.ProtoMajor, p.ProtoMinor, age, verdict)
 	}
 	return strings.Join(parts, "; ")
+}
+
+// ignoreTensorSplit drops a caller's TensorSplit when the caller did not also
+// choose RPCServers. llama.cpp maps its entries by device position (peers in
+// --rpc order, then the local GPU), and the peers the server picks, and their
+// order, change with the policy and with each peer's load, so the same split
+// would land on different devices from one request to the next (a "4,6" meant
+// for a peer and the GPU put 60 % on the second peer and nothing on the GPU).
+// It is not applied to a local-only load either (appendRPCArgs).
+func ignoreTensorSplit(opts api.Options) api.Options {
+	if opts.RPCServers == "" && opts.TensorSplit != "" {
+		slog.Warn("cluster: ignoring tensor_split because rpc_servers is not set; it maps to devices by position, which automatic peer selection does not fix",
+			"tensor_split", opts.TensorSplit)
+		opts.TensorSplit = ""
+	}
+	return opts
 }
 
 // peersAt returns the peers of usable whose --rpc address is in addrs.
@@ -345,6 +362,7 @@ func SelectReachableRPCServers(gpus []ml.DeviceInfo, predicted uint64, peers []P
 	if opts.RPCServers != "" {
 		return opts
 	}
+	opts = ignoreTensorSplit(opts) // once, not on every round below
 	for {
 		picked := SelectRPCServers(gpus, predicted, peers, opts)
 		if picked.RPCServers == "" {

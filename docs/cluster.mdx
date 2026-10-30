@@ -352,7 +352,10 @@ peers actually got used:
   gets (llama-server's `--tensor-split`). Note the device order: since
   Ollama never passes `--device`, every RPC peer sorts *before* every local
   GPU, so with one local GPU and one RPC peer, `tensor_split[0]` is the
-  peer and `tensor_split[1]` is local. Leave unset and, for peers the server
+  peer and `tensor_split[1]` is local. Only used together with `rpc_servers`:
+  without it the server picks the peers and their order, so the entries would
+  land on different devices from one request to the next, and the split is
+  ignored with a warning in the server log. Leave unset and, for peers the server
   picked itself next to one local GPU, the server fills the local GPU first
   and puts only the rest on peers (largest free memory first); anything else
   gets llama-server's own `--fit` split from live free memory.

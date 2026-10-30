@@ -340,8 +340,8 @@ func TestSelectRPCServersFillsLocalFirst(t *testing.T) {
 		t.Fatalf("model larger than all devices: split %q, want none", got.TensorSplit)
 	}
 
-	// A split the caller chose is never replaced.
-	got = SelectRPCServers(gpus, mib(25600), peers, api.Options{Runner: api.Runner{TensorSplit: "1,1"}})
+	// A split the caller chose (with the peers it chose) is never replaced.
+	got = SelectRPCServers(gpus, mib(25600), peers, api.Options{Runner: api.Runner{RPCServers: "10.0.0.2:50052", TensorSplit: "1,1"}})
 	if got.TensorSplit != "1,1" {
 		t.Fatalf("explicit split replaced: %q", got.TensorSplit)
 	}
@@ -444,5 +444,38 @@ func TestPlacementLogsCandidates(t *testing.T) {
 	SelectRPCServers([]ml.DeviceInfo{gpu(8000)}, mib(4000), []Peer{big}, api.Options{})
 	if buf.Len() != 0 {
 		t.Errorf("logged although the model fits locally:\n%s", buf.String())
+	}
+}
+
+// TestTensorSplitNeedsExplicitRPCServers: a tensor_split sent without
+// rpc_servers would be applied to whatever peers (and order) auto-selection
+// returns, so it is dropped; with rpc_servers it is the caller's (#74).
+func TestTensorSplitNeedsExplicitRPCServers(t *testing.T) {
+	gpus := []ml.DeviceInfo{gpu(18125)}
+	peers := []Peer{peerAt("10.0.0.2", 25600, 0, 0), peerAt("10.0.0.3", 12288, 0, 0)}
+	dial := func(string) error { return nil }
+	ask := api.Options{Runner: api.Runner{TensorSplit: "4,6"}}
+
+	for name, got := range map[string]api.Options{
+		"select":    SelectRPCServers(gpus, mib(25600), peers, ask),
+		"reachable": SelectReachableRPCServers(gpus, mib(25600), peers, ask, dial),
+	} {
+		if got.TensorSplit == "4,6" {
+			t.Errorf("%s: the caller's tensor_split was applied to auto-selected peers", name)
+		}
+		// The computed fill (peers first, then the GPU) takes its place.
+		if got.RPCServers != "10.0.0.2:50052" || got.TensorSplit != "11004,14596" {
+			t.Errorf("%s: rpc %q split %q, want the fill 11004,14596 on the big peer", name, got.RPCServers, got.TensorSplit)
+		}
+	}
+
+	// Nothing selected and nothing explicit: the split is not applied either.
+	if got := SelectRPCServers(gpus, mib(1000), peers, ask); got.TensorSplit != "" {
+		t.Errorf("local-only: split %q, want none", got.TensorSplit)
+	}
+
+	explicit := api.Options{Runner: api.Runner{RPCServers: "10.0.0.3:50052,10.0.0.2:50052", TensorSplit: "4,6,10"}}
+	if got := SelectReachableRPCServers(gpus, mib(25600), peers, explicit, dial); got.TensorSplit != "4,6,10" || got.RPCServers != explicit.RPCServers {
+		t.Errorf("explicit rpc_servers: got %q / %q, want the request's own", got.RPCServers, got.TensorSplit)
 	}
 }

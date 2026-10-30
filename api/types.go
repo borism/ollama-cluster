@@ -631,7 +631,9 @@ type Runner struct {
 	// automatic --fit decides, proportional to free memory (llama.cpp's
 	// default). Independent of RPCAuto/RPCPlacement -- this only overrides
 	// the split ratio, not which peers are used, and only takes effect
-	// alongside a non-empty RPCServers (manual or auto-selected).
+	// alongside a non-empty RPCServers set by the caller: without one the
+	// peers and their order are the server's choice, so the entries could not
+	// be tied to devices and the split is ignored (cluster.SelectRPCServers).
 	TensorSplit string `json:"tensor_split,omitempty"`
 }
 
