@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"strings"
+	"sync"
 	"sync/atomic"
 )
 
@@ -13,9 +14,18 @@ type StatusWriter struct {
 	// Subprocess wrappers may wire both stdout and stderr to the same
 	// StatusWriter, and os/exec serializes Write calls in that case.
 	lastErrMsg atomic.Value
+
+	// tail holds the last tailLines output lines of any kind, so a process
+	// that dies leaves its final words even when none carry an error prefix.
+	tailMu sync.Mutex
+	tail   []string
 }
 
-const maxCapturedErrorBytes = 8 * 1024
+const (
+	maxCapturedErrorBytes = 8 * 1024
+	tailLines             = 20
+	maxTailLineBytes      = 1024
+)
 
 func NewStatusWriter(out io.Writer) *StatusWriter {
 	return &StatusWriter{
@@ -31,6 +41,29 @@ func (w *StatusWriter) LastError() string {
 		return v.(string)
 	}
 	return ""
+}
+
+// Tail returns the last tailLines non-empty output lines, oldest first.
+func (w *StatusWriter) Tail() string {
+	if w == nil {
+		return ""
+	}
+	w.tailMu.Lock()
+	defer w.tailMu.Unlock()
+	return strings.Join(w.tail, "\n")
+}
+
+func (w *StatusWriter) pushTail(line string) {
+	if len(line) > maxTailLineBytes {
+		line = line[:maxTailLineBytes]
+	}
+	w.tailMu.Lock()
+	defer w.tailMu.Unlock()
+	// Shifting 20 strings per line is fine at worker output rates.
+	if len(w.tail) == tailLines {
+		w.tail = append(w.tail[:0], w.tail[1:]...)
+	}
+	w.tail = append(w.tail, line)
 }
 
 func (w *StatusWriter) SetLastError(msg string) {
@@ -160,6 +193,7 @@ func (w *StatusWriter) Write(b []byte) (int, error) {
 			continue
 		}
 
+		w.pushTail(line)
 		if errMsg := statusErrorLine(line); errMsg != "" {
 			w.AppendError(errMsg)
 		}

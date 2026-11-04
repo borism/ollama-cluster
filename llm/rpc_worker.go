@@ -206,6 +206,8 @@ func (w *RPCWorker) spawn() error {
 		// accept() failure instead of returning) is tracked upstream in
 		// issue #25.
 		slog.Warn("cluster: rpc worker exited unexpectedly, restarting", "error", err, "last_output", status.LastError())
+		// last_output keeps only error-prefixed lines; this is the raw tail.
+		slog.Warn("cluster: rpc worker exit detail", "state", cmd.ProcessState.String(), "uptime", time.Since(startedAt).Round(time.Second), "tail", status.Tail())
 		w.restart(time.Since(startedAt))
 	}(w.startedAt)
 	return nil

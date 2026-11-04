@@ -1,7 +1,9 @@
 package llm
 
 import (
+	"fmt"
 	"io"
+	"strings"
 	"testing"
 )
 
@@ -95,5 +97,22 @@ func TestIsOutOfMemoryMessage(t *testing.T) {
 		if got := IsOutOfMemoryMessage(tt.msg); got != tt.want {
 			t.Fatalf("IsOutOfMemoryMessage(%q) = %v, want %v", tt.msg, got, tt.want)
 		}
+	}
+}
+
+func TestStatusWriterTailKeepsLastLines(t *testing.T) {
+	w := NewStatusWriter(nil)
+	var want []string
+	for i := range tailLines + 5 {
+		line := fmt.Sprintf("line %d", i)
+		if i == tailLines+4 {
+			line = "Failed to accept client connection" // no error prefix
+		}
+		fmt.Fprintln(w, line)
+		want = append(want, line)
+	}
+	want = want[len(want)-tailLines:]
+	if got := w.Tail(); got != strings.Join(want, "\n") {
+		t.Fatalf("Tail() = %q, want %q", got, strings.Join(want, "\n"))
 	}
 }
