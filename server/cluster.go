@@ -3,6 +3,7 @@ package server
 import (
 	"cmp"
 	"context"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"github.com/borism/ollama-cluster/cluster"
 	"github.com/borism/ollama-cluster/discover"
 	"github.com/borism/ollama-cluster/envconfig"
+	"github.com/borism/ollama-cluster/fs/gguf"
 	"github.com/borism/ollama-cluster/llm"
 	"github.com/borism/ollama-cluster/ml"
 )
@@ -182,6 +184,75 @@ func logClusterPeers(ctx context.Context, table *cluster.Table) {
 			seen = now
 		}
 	}
+}
+
+// clusterModelFormat is f's file type and the ggml types its tensors use, for
+// checking them against each peer's backend before placing layers there
+// (cluster.ExcludeIncompatiblePeers) and for naming the format in errors.
+func clusterModelFormat(f *gguf.Model) cluster.ModelFormat {
+	if f == nil {
+		return cluster.ModelFormat{Name: "unknown"}
+	}
+	var types []string
+	for _, t := range f.Tensors().Items() {
+		if name := strings.ToUpper(t.Type.String()); !slices.Contains(types, name) {
+			types = append(types, name)
+		}
+	}
+	return cluster.ModelFormat{Name: f.KV().FileType().String(), TensorTypes: types}
+}
+
+// rpcServerCrashed is what llama.cpp's RPC client aborts with when a peer's
+// ggml-rpc-server dies or answers garbage (RPC_STATUS_ASSERT in
+// ggml/src/ggml-rpc/ggml-rpc.cpp), e.g. after the peer aborted on an
+// "unsupported op" at warm-up. It does not say which peer.
+const rpcServerCrashed = "Remote RPC server crashed or returned malformed response"
+
+// crashedRPCPeers returns the peers of the comma-separated rpcServers that
+// may have crashed, if errMsg is llama.cpp's RPC crash abort: the one peer if
+// there is one, else all of them, because the abort doesn't name one.
+func crashedRPCPeers(errMsg, rpcServers string) []string {
+	if rpcServers == "" || !strings.Contains(errMsg, rpcServerCrashed) {
+		return nil
+	}
+	return strings.Split(rpcServers, ",")
+}
+
+// explainRPCCrash wraps a load error from crashed RPC peers (crashedRPCPeers)
+// in one that names the model's format, the peer(s) with their backend and,
+// where the compatibility table knows it, the reason. peers is the discovery
+// table, to look the backend up by address.
+func explainRPCCrash(err error, crashed []string, peers []cluster.Peer, format cluster.ModelFormat) error {
+	describe := func(addr string) (string, string) {
+		for _, p := range peers {
+			if fmt.Sprintf("%s:%d", p.Addr, p.RPCPort) == addr {
+				return fmt.Sprintf("%s (%s)", addr, p.Backends()), p.FormatIncompatibility(format)
+			}
+		}
+		return addr + " (unknown backend)", ""
+	}
+
+	if len(crashed) == 1 {
+		who, reason := describe(crashed[0])
+		if reason == "" {
+			reason = `its ggml-rpc-server stopped during the load; "unsupported op" in that peer's server log means its backend cannot run one of this model's tensor types`
+		}
+		return fmt.Errorf("cluster peer %s failed while loading this %s model: %s: %w", who, format.Name, reason, err)
+	}
+
+	var who, reasons []string
+	for _, addr := range crashed {
+		d, reason := describe(addr)
+		who = append(who, d)
+		if reason != "" {
+			reasons = append(reasons, addr+": "+reason)
+		}
+	}
+	msg := fmt.Sprintf("one of the cluster peers %s failed while loading this %s model, and llama.cpp does not say which", strings.Join(who, ", "), format.Name)
+	if len(reasons) > 0 {
+		msg += " (" + strings.Join(reasons, "; ") + ")"
+	}
+	return fmt.Errorf("%s: %w", msg, err)
 }
 
 // localGPUDevices lists this machine's GPUs; a variable so tests can fake it.

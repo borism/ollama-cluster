@@ -22,6 +22,11 @@ func TestStatusWriterCapturesErrorLine(t *testing.T) {
 			want: "Failed to connect to 10.0.0.2:50052",
 		},
 		{
+			name: "rpc peer crash",
+			log:  "/src/ggml/src/ggml-rpc/ggml-rpc.cpp:685: Remote RPC server crashed or returned malformed response\n",
+			want: "Remote RPC server crashed or returned malformed response",
+		},
+		{
 			name: "cobra error",
 			log:  "Error: foo baz bar\n",
 			want: "Error: foo baz bar",
