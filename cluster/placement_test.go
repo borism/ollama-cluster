@@ -176,6 +176,70 @@ func TestSelectRPCServersMinUsefulMemoryBoundary(t *testing.T) {
 	}
 }
 
+// TestRPCAddr: an IPv6 host is bracketed, the only form a "host:port"
+// parser can split, and IPv4 is unchanged (#34).
+func TestRPCAddr(t *testing.T) {
+	for addr, want := range map[string]string{
+		"10.0.0.2":    "10.0.0.2:50052",
+		"2001:db8::1": "[2001:db8::1]:50052",
+		"fd12::7":     "[fd12::7]:50052",
+	} {
+		if got := rpcAddr(Peer{Addr: addr, RPCPort: 50052}); got != want {
+			t.Errorf("rpcAddr(%s) = %q, want %q", addr, got, want)
+		}
+	}
+}
+
+// TestRPCHostProblem: IPv4 (link-local 169.254/16 too: Thunderbolt bridges
+// use it and it needs no zone) can go into --rpc; IPv6 link-local never can,
+// since --rpc can't carry its zone; other IPv6 only once llama.cpp RPC
+// reaches IPv6 (rpcIPv6). A hostname is left for llama.cpp to resolve.
+func TestRPCHostProblem(t *testing.T) {
+	for host, ok := range map[string]bool{
+		"10.0.0.2":         true,
+		"169.254.10.2":     true,
+		"127.0.0.1":        true,
+		"::ffff:10.0.0.2":  true,
+		"fe80::1":          false,
+		"fe80::1%en0":      false,
+		"2001:db8::1":      rpcIPv6,
+		"fd12::7":          rpcIPv6,
+		"peer.example.com": true,
+	} {
+		if got := rpcHostProblem(host); (got == "") != ok {
+			t.Errorf("rpcHostProblem(%q) = %q, want usable=%v", host, got, ok)
+		}
+	}
+	if got := rpcHostProblem("fe80::1"); !strings.Contains(got, "link-local") {
+		t.Errorf("rpcHostProblem(fe80::1) = %q, want it to say link-local", got)
+	}
+}
+
+// TestSelectRPCServersSkipsIPv6LinkLocal: a peer whose best address is IPv6
+// link-local is never handed to --rpc, however much memory it has, and the
+// placement log says why.
+func TestSelectRPCServersSkipsIPv6LinkLocal(t *testing.T) {
+	var buf bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(old) })
+
+	linkLocal := peer("fe80::1", 50052, RPCProtoMajor, 0, 50000)
+	v4 := peer("10.0.0.3", 50052, RPCProtoMajor, 0, 9000)
+
+	got := SelectRPCServers([]ml.DeviceInfo{gpu(100)}, mib(10000), []Peer{linkLocal, v4}, api.Options{})
+	if got.RPCServers != "10.0.0.3:50052" {
+		t.Errorf("RPCServers = %q, want only the IPv4 peer", got.RPCServers)
+	}
+	if !strings.Contains(buf.String(), "IPv6 link-local address") {
+		t.Errorf("placement log doesn't say why fe80::1 was left out:\n%s", buf.String())
+	}
+
+	if got := SelectRPCServers([]ml.DeviceInfo{gpu(100)}, mib(10000), []Peer{linkLocal}, api.Options{}); got.RPCServers != "" {
+		t.Errorf("RPCServers = %q, want empty with only a link-local peer", got.RPCServers)
+	}
+}
+
 // TestSelectRPCServersPrefersLowLoad: two peers with equal free memory but
 // different self-reported load. The idle one should be used to its full
 // capacity and listed first; the busy one only covers the remainder.

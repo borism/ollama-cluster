@@ -8,6 +8,7 @@ import (
 	"maps"
 	"math"
 	"net"
+	"net/netip"
 	"slices"
 	"sort"
 	"strconv"
@@ -54,7 +55,7 @@ func peerFreeMemory(p Peer) uint64 {
 }
 
 func usablePeer(p Peer) bool {
-	return p.RPCPort != 0 && p.ProtoIncompatibility() == "" &&
+	return p.RPCPort != 0 && p.ProtoIncompatibility() == "" && rpcHostProblem(p.Addr) == "" &&
 		peerFreeMemory(p) >= minUsefulMemory
 }
 
@@ -230,6 +231,8 @@ func describePeers(peers []Peer, skipped []Skipped, now time.Time) string {
 			verdict = "not sharing (rpc_port 0)"
 		case p.ProtoIncompatibility() != "":
 			verdict = p.ProtoIncompatibility()
+		case rpcHostProblem(p.Addr) != "":
+			verdict = rpcHostProblem(p.Addr)
 		case peerFreeMemory(p) < minUsefulMemory:
 			verdict = "under 1 GiB free"
 		}
@@ -405,9 +408,43 @@ func selectWaterFill(usable []Peer, shortfall uint64) []string {
 	return addrs
 }
 
-// rpcAddr is how a peer's ggml-rpc-server appears in --rpc.
+// rpcAddr is how a peer's ggml-rpc-server appears in --rpc. JoinHostPort
+// brackets an IPv6 host ("[2001:db8::1]:50052"); usablePeer keeps a peer at
+// an address --rpc can't take (rpcHostProblem) from ever getting here.
 func rpcAddr(p Peer) string {
-	return fmt.Sprintf("%s:%d", p.Addr, p.RPCPort)
+	return net.JoinHostPort(p.Addr, strconv.Itoa(p.RPCPort))
+}
+
+// rpcIPv6 is whether llama.cpp's RPC transport at LLAMA_CPP_VERSION can
+// reach an IPv6 address. It can't (#34): socket_t::connect and
+// socket_t::create_server in ggml/src/ggml-rpc/transport.cpp open AF_INET
+// sockets (via gethostbyname and inet_addr), and parse_endpoint in
+// ggml-rpc.cpp splits "host:port" at the first ':', so even
+// "[2001:db8::1]:50052" doesn't parse. Flip it once the pin handles IPv6.
+const rpcIPv6 = false
+
+// rpcHostProblem returns "" if host, a peer address, can go into --rpc, else
+// why not. llama-server aborts the whole load on an --rpc endpoint it can't
+// parse or reach, so discovery never probes such an address (probePeer) and
+// placement never picks a peer at one (usablePeer). Only IP literals are
+// judged; a hostname is left to llama.cpp to resolve, as before.
+func rpcHostProblem(host string) string {
+	ip, err := netip.ParseAddr(host)
+	if err != nil {
+		return ""
+	}
+	ip = ip.Unmap()
+	switch {
+	case ip.Is4():
+		return "" // IPv4 link-local (169.254/16) included: it needs no zone
+	case ip.IsLinkLocalUnicast() || ip.Zone() != "":
+		// fe80::/10 only means something together with a zone
+		// ("fe80::1%en0"), and --rpc has no way to carry one.
+		return "IPv6 link-local address, which --rpc can't use"
+	case !rpcIPv6:
+		return "IPv6 address, which llama.cpp RPC can't reach yet"
+	}
+	return ""
 }
 
 // SelectReachableRPCServers is SelectRPCServers, but checks that every peer
