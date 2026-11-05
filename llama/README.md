@@ -18,7 +18,7 @@ cmake -S llama/server --preset cpu
 ```
 
 This configure step fetches the pinned source and applies `llama/compat/`
-patches. Confirm the resulting checkout, usually
+patches, then `llama/rpc-patches/`. Confirm the resulting checkout, usually
 `build/llama-server-cpu/_deps/llama_cpp-src`, resolves to the intended new ref.
 Do not trust an old or dirty `_deps/` checkout as validation.
 This is only a source and patch-application check; it is not runtime
@@ -64,6 +64,10 @@ For build prerequisites, platform notes, and backend selection, see the
 Patches under `llama/compat/` are applied during configure. If a patch
 insertion point moved, regenerate the patch against a fresh checkout of the new
 ref rather than editing an already-patched `_deps/` tree.
+
+The RPC fixes under `llama/rpc-patches/` are applied right after them. On a
+bump, drop any that the new ref already has; see
+[`rpc-patches/README.md`](rpc-patches/README.md).
 
 If compatibility sources, model patches, `llama/server/CMakeLists.txt`, or
 `cmake/local.cmake` changed, build the CPU target:
