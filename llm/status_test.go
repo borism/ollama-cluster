@@ -5,6 +5,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestStatusWriterCapturesErrorLine(t *testing.T) {
@@ -114,5 +115,31 @@ func TestStatusWriterTailKeepsLastLines(t *testing.T) {
 	want = want[len(want)-tailLines:]
 	if got := w.Tail(); got != strings.Join(want, "\n") {
 		t.Fatalf("Tail() = %q, want %q", got, strings.Join(want, "\n"))
+	}
+}
+
+func TestStatusWriterTailCapsLongLines(t *testing.T) {
+	tests := []struct {
+		name string
+		line string
+		want string
+	}{
+		{"ascii", strings.Repeat("a", 2*maxTailLineBytes), strings.Repeat("a", maxTailLineBytes)},
+		{"2-byte rune at the cap", strings.Repeat("a", maxTailLineBytes-1) + "é", strings.Repeat("a", maxTailLineBytes-1)},
+		{"4-byte rune at the cap", strings.Repeat("a", maxTailLineBytes-2) + "😀", strings.Repeat("a", maxTailLineBytes-2)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := NewStatusWriter(nil)
+			fmt.Fprintln(w, tt.line)
+			got := w.Tail()
+			if !utf8.ValidString(got) {
+				t.Fatalf("Tail() is not valid UTF-8, ends in %q", got[max(0, len(got)-4):])
+			}
+			if got != tt.want {
+				t.Fatalf("Tail() is %d bytes, want %d", len(got), len(tt.want))
+			}
+		})
 	}
 }

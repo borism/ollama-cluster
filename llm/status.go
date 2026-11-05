@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"unicode/utf8"
 )
 
 // StatusWriter is a writer that captures error messages from the llama runner process
@@ -44,6 +45,9 @@ func (w *StatusWriter) LastError() string {
 }
 
 // Tail returns the last tailLines non-empty output lines, oldest first.
+// Each Write is split into lines on its own, so a line that arrives in two
+// writes becomes two entries. Lines from stdout and stderr appear in the
+// order they arrived, not the order the program printed them.
 func (w *StatusWriter) Tail() string {
 	if w == nil {
 		return ""
@@ -55,7 +59,13 @@ func (w *StatusWriter) Tail() string {
 
 func (w *StatusWriter) pushTail(line string) {
 	if len(line) > maxTailLineBytes {
-		line = line[:maxTailLineBytes]
+		// Cut on a character boundary, and copy so the tail does not keep
+		// the whole long line alive.
+		n := maxTailLineBytes
+		for n > 0 && !utf8.RuneStart(line[n]) {
+			n--
+		}
+		line = strings.Clone(line[:n])
 	}
 	w.tailMu.Lock()
 	defer w.tailMu.Unlock()

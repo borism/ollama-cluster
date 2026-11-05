@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -227,9 +228,33 @@ func TestRPCFakeServerHelper(t *testing.T) {
 	}
 }
 
+// syncBuffer is a bytes.Buffer that the exit watcher goroutines can log into
+// while the test reads it.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 // TestRPCWorkerRestartsOnCrash kills the worker process behind Stop's back
 // and expects it back on the same port; after Stop it must stay down.
 func TestRPCWorkerRestartsOnCrash(t *testing.T) {
+	var logs syncBuffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(prev)
+
 	port, err := pickFreeTCPPort()
 	if err != nil {
 		t.Fatal(err)
@@ -273,6 +298,9 @@ func TestRPCWorkerRestartsOnCrash(t *testing.T) {
 			t.Fatalf("Port() = %d, want %d back after a crash", w.Port(), port)
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+	if got := logs.String(); !strings.Contains(got, "exit detail") || !strings.Contains(got, "state=") {
+		t.Fatalf("log output = %q, want the exit detail line with the process state", got)
 	}
 
 	w.Stop()
