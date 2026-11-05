@@ -74,7 +74,7 @@ func TestRPCWorkerLogsUnexpectedExit(t *testing.T) {
 		t.Skipf("ggml-rpc-server not found, skipping: %v", err)
 	}
 
-	var buf bytes.Buffer
+	var buf syncBuffer
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
 	defer slog.SetDefault(prev)
@@ -97,8 +97,14 @@ func TestRPCWorkerLogsUnexpectedExit(t *testing.T) {
 		t.Fatal("worker did not report exit after being killed")
 	}
 
-	if got := buf.String(); !strings.Contains(got, "rpc worker exited") {
-		t.Fatalf("log output = %q, want a line about the worker exiting", got)
+	// done closes before the exit watcher logs, so wait for the line
+	// rather than reading the buffer straight away.
+	deadline := time.Now().Add(2 * time.Second)
+	for !strings.Contains(buf.String(), "rpc worker exited") {
+		if time.Now().After(deadline) {
+			t.Fatalf("log output = %q, want a line about the worker exiting", buf.String())
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
