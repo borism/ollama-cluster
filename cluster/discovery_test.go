@@ -75,6 +75,30 @@ func TestTablePeersExpiry(t *testing.T) {
 	}
 }
 
+// TestTableStale: a peer that stopped beaconing is handed to the placement
+// log line as too old, unless it went quiet long ago or its address is back
+// under a new ID (a restarted peer) (#71).
+func TestTableStale(t *testing.T) {
+	now := time.Now()
+	tbl := &Table{peers: make(map[string]Peer), ttl: 15 * time.Second}
+	for _, p := range []Peer{
+		{ID: "live", Addr: "10.0.0.2", LastSeen: now.Add(-time.Second)},
+		{ID: "quiet", Addr: "10.0.0.3", LastSeen: now.Add(-20 * time.Second)},
+		{ID: "restarted", Addr: "10.0.0.2", LastSeen: now.Add(-30 * time.Second)},
+		{ID: "left", Addr: "10.0.0.4", LastSeen: now.Add(-time.Hour)},
+	} {
+		tbl.observe(p)
+	}
+
+	got := tbl.Stale()
+	if len(got) != 1 || got[0].Peer.ID != "quiet" || got[0].Reason != "too old (no beacon in 15s)" {
+		t.Fatalf("Stale() = %+v, want only \"quiet\", too old", got)
+	}
+	if peers := tbl.Peers(); len(peers) != 1 || peers[0].ID != "live" {
+		t.Fatalf("Peers() = %+v, want only \"live\"", peers)
+	}
+}
+
 // TestTableSelf checks Self() reflects the most recent updateSelf call.
 func TestTableSelf(t *testing.T) {
 	tbl := &Table{peers: make(map[string]Peer)}

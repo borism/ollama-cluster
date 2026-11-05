@@ -80,6 +80,34 @@ func (t *Table) Peers() []Peer {
 	return peers
 }
 
+// staleListed is how long after its last beacon a peer that went quiet is
+// still named on the placement log line (see Stale).
+const staleListed = 10 * time.Minute
+
+// Stale returns the peers Peers leaves out because their last beacon is older
+// than Config.TTL, so that placement can name them on its log line (see
+// SelectReachableRPCServers). It returns only peers heard from within
+// staleListed, and skips an old entry whose address is live again under a
+// new ID (a restarted peer); the table never deletes entries, hence both.
+func (t *Table) Stale() []Skipped {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	now := time.Now()
+	live := map[string]bool{}
+	for _, p := range t.peers {
+		if !p.Stale(now, t.ttl) {
+			live[p.Addr] = true
+		}
+	}
+	var stale []Skipped
+	for _, p := range t.peers {
+		if p.Stale(now, t.ttl) && !live[p.Addr] && now.Sub(p.LastSeen) <= staleListed {
+			stale = append(stale, Skipped{Peer: p, Reason: fmt.Sprintf("too old (no beacon in %s)", t.ttl)})
+		}
+	}
+	return stale
+}
+
 func (t *Table) updateSelf(p Peer) {
 	t.mu.Lock()
 	defer t.mu.Unlock()

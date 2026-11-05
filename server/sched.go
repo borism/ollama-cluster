@@ -608,10 +608,16 @@ func (s *Scheduler) load(req *LlmRequest, systemInfo ml.SystemInfo, gpus []ml.De
 			predicted := llm.PredictServerVRAM(req.model.ModelPath, f, predictedCtx, req.model.ProjectorPaths)
 			reqOpts := req.opts
 			if table := s.clusterTable.Load(); table != nil && (reqOpts.RPCAuto == nil || *reqOpts.RPCAuto) {
+				// Peers left out here are still named on the placement log line.
+				skipped := table.Stale()
 				peers := slices.DeleteFunc(slices.Clone(table.Peers()), func(p cluster.Peer) bool {
-					return req.excludeRPC[fmt.Sprintf("%s:%d", p.Addr, p.RPCPort)]
+					failed := req.excludeRPC[fmt.Sprintf("%s:%d", p.Addr, p.RPCPort)]
+					if failed {
+						skipped = append(skipped, cluster.Skipped{Peer: p, Reason: "failed during the previous load"})
+					}
+					return failed
 				})
-				reqOpts = cluster.SelectReachableRPCServers(gpus, predicted, peers, reqOpts, cluster.DialRPC)
+				reqOpts = cluster.SelectReachableRPCServers(gpus, predicted, peers, reqOpts, cluster.DialRPC, skipped...)
 				// With peers picked here the request has no usable split of its
 				// own: one it set without rpc_servers was dropped by
 				// cluster.SelectRPCServers and must not be restored.
