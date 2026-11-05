@@ -2327,8 +2327,9 @@ func TestFailedRPCPeer(t *testing.T) {
 	}
 }
 
-// A peer that dies after the dial check makes llama-server exit with "Failed
-// to connect"; load retries once without it, and not a second time.
+// A peer that dies after the dial check, and stays down, makes llama-server
+// exit with "Failed to connect"; load retries once without it, and not a
+// second time.
 func TestSchedLoadRetriesWithoutFailedRPCPeer(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
@@ -2368,6 +2369,15 @@ func TestSchedLoadRetriesWithoutFailedRPCPeer(t *testing.T) {
 			Devices: []ml.DeviceInfo{{TotalMemory: 64 * format.GigaByte, FreeMemory: 64 * format.GigaByte}},
 		}))
 		var launched []string
+		// Once llama-server has failed on it the peer stays down, so the wait
+		// for it to come back (#82) ends without a same-peer retry.
+		s.rpcPeerWait = 10 * time.Millisecond
+		s.dialRPCFn = func(addr string) error {
+			if len(launched) > 0 {
+				return errors.New("connection refused")
+			}
+			return cluster.DialRPC(addr)
+		}
 		connectErr := errors.New("llama-server process has terminated: exit status 1: Failed to connect to " + peerAddr)
 		s.newServerFn = func(_ ml.SystemInfo, _ []ml.DeviceInfo, model string, _ *gguf.Model, _ []string, _ []string, opts api.Options, _ int, _ llm.LlamaServerConfig) (llm.LlamaServer, error) {
 			launched = append(launched, opts.RPCServers)

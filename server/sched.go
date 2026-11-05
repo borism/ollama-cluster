@@ -47,6 +47,14 @@ type LlmRequest struct {
 	// excludeRPC holds peers (host:port) that failed to connect or crashed
 	// during load; non-empty means the single peer retry has been used.
 	excludeRPC map[string]bool
+	// rpcPeerWaited is set once a load that lost an --rpc peer has waited for
+	// it to come back (rpcPeerDropped), so that wait and the same-peer retry
+	// it can lead to happen at most once per request.
+	rpcPeerWaited bool
+	// rpcPin is the rpc_servers and tensor_split of the attempt whose peers
+	// came back; the next load() launches with them instead of picking peers
+	// again, and clears it.
+	rpcPin *api.Runner
 	// noFillSplit drops the --tensor-split cluster.SelectRPCServers chose,
 	// after a load that used it ran out of memory (an explicit split turns
 	// off llama.cpp's --fit, so a margin that is too thin must not be final).
@@ -97,6 +105,12 @@ type Scheduler struct {
 	// cluster mode is switched at runtime), consulted in load() to
 	// auto-fill RPCServers when a model doesn't fit locally.
 	clusterTable atomic.Pointer[cluster.Table]
+	// dialRPCFn checks that a peer's ggml-rpc-server answers the RPC
+	// handshake (cluster.DialRPC; tests fake it).
+	dialRPCFn func(addr string) error
+	// rpcPeerWait is how long a load that lost an --rpc peer waits for it to
+	// answer again before giving up on the same-peer retry (rpcPeerDropped).
+	rpcPeerWait time.Duration
 }
 
 // loadedModelsForName returns models still owned by loaded runners. The models
@@ -150,6 +164,8 @@ func InitScheduler(ctx context.Context) *Scheduler {
 		getGpuFn:        discover.GPUDevices,
 		getSystemInfoFn: discover.GetSystemInfo,
 		waitForRecovery: 5 * time.Second,
+		dialRPCFn:       cluster.DialRPC,
+		rpcPeerWait:     5 * time.Second,
 	}
 	sched.loadFn = sched.load
 	return sched
@@ -607,6 +623,13 @@ func (s *Scheduler) load(req *LlmRequest, systemInfo ml.SystemInfo, gpus []ml.De
 			predictedCtx := effectiveLlamaServerContext(req.opts.NumCtx, f, numParallel)
 			predicted := llm.PredictServerVRAM(req.model.ModelPath, f, predictedCtx, req.model.ProjectorPaths)
 			reqOpts := req.opts
+			if pin := req.rpcPin; pin != nil {
+				// The same-peer retry (rpcPeerDropped): the peers that were
+				// launched, not a fresh pick, which a beacon sent while the
+				// worker restarted (rpc_port 0) would change.
+				req.rpcPin = nil
+				reqOpts.RPCServers, reqOpts.TensorSplit = pin.RPCServers, pin.TensorSplit
+			}
 			if table := s.clusterTable.Load(); table != nil && (reqOpts.RPCAuto == nil || *reqOpts.RPCAuto) {
 				// Peers left out here are still named on the placement log line.
 				skipped := table.Stale()
@@ -620,7 +643,7 @@ func (s *Scheduler) load(req *LlmRequest, systemInfo ml.SystemInfo, gpus []ml.De
 				if reqOpts.RPCServers == "" {
 					peers = cluster.ExcludeIncompatiblePeers(gpus, predicted, peers, clusterModelFormat(f))
 				}
-				reqOpts = cluster.SelectReachableRPCServers(gpus, predicted, peers, reqOpts, cluster.DialRPC, skipped...)
+				reqOpts = cluster.SelectReachableRPCServers(gpus, predicted, peers, reqOpts, s.dialRPCFn, skipped...)
 				// With peers picked here the request has no usable split of its
 				// own: one it set without rpc_servers was dropped by
 				// cluster.SelectRPCServers and must not be restored.
@@ -738,9 +761,15 @@ func (s *Scheduler) load(req *LlmRequest, systemInfo ml.SystemInfo, gpus []ml.De
 		s.activeLoading.Close()
 		s.activeLoading = nil
 
-		// A peer can die between the dial check and llama-server connecting.
-		// Retry once without it; only for peers we picked ourselves.
-		if addr, ok := failedRPCPeer(err.Error(), launchOpts.RPCServers); ok && req.opts.RPCServers == "" && len(req.excludeRPC) == 0 {
+		// A peer can die between the dial check and llama-server connecting,
+		// or mid-load. A worker that restarted is back in about a second
+		// (#82): retry once with the same peers when it is. Otherwise retry
+		// once without it; only for peers we picked ourselves.
+		retrySame, addr := s.rpcPeerDropped(req, launchOpts, err)
+		if retrySame {
+			return s.load(req, systemInfo, gpus, requireFull)
+		}
+		if addr != "" && req.opts.RPCServers == "" && len(req.excludeRPC) == 0 {
 			slog.Warn("cluster: peer failed during load, retrying without it", "addr", addr)
 			req.excludeRPC = map[string]bool{addr: true}
 			return s.load(req, systemInfo, gpus, requireFull)
@@ -911,6 +940,92 @@ func failedRPCPeer(errMsg, rpcServers string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// rpcPeerCrashed is how llama-server aborts when an --rpc peer it is already
+// connected to stops answering, e.g. because the peer's worker exited
+// mid-load (RPC_STATUS_ASSERT in ggml/src/ggml-rpc/ggml-rpc.cpp). Unlike
+// "Failed to connect to", it does not name the peer.
+const rpcPeerCrashed = "Remote RPC server crashed"
+
+// rpcPeerPoll is how often awaitRPCPeers dials a peer that is not back yet.
+const rpcPeerPoll = 250 * time.Millisecond
+
+// rpcPeerDropped handles a load that failed with err because llama-server lost
+// one of launch's --rpc peers: it could not connect to one (failedRPCPeer
+// names it) or one stopped answering mid-load (rpcPeerCrashed). A worker that
+// exits restarts on the same port in about a second (llm/rpc_worker.go), so
+// the first time this happens to req it waits up to s.rpcPeerWait for every
+// peer to answer the RPC handshake again. If they all do, it pins launch's
+// peers for the next load and returns retrySame. Otherwise addr is the peer
+// to retry without: the one named, else one that did not answer (after the
+// one wait is used, a single handshake round finds it).
+func (s *Scheduler) rpcPeerDropped(req *LlmRequest, launch api.Options, err error) (retrySame bool, addr string) {
+	addr, _ = failedRPCPeer(err.Error(), launch.RPCServers)
+	if launch.RPCServers == "" || (addr == "" && !strings.Contains(err.Error(), rpcPeerCrashed)) {
+		return false, ""
+	}
+	addrs := strings.Split(launch.RPCServers, ",")
+	if req.rpcPeerWaited {
+		if addr == "" {
+			if down := s.awaitRPCPeers(req.ctx, addrs, 0); len(down) > 0 {
+				addr = down[0]
+			}
+		}
+		slog.Warn("cluster: rpc peer dropped during load again, not retrying with the same peers a second time", "rpc_servers", launch.RPCServers, "failed", addr)
+		return false, addr
+	}
+	req.rpcPeerWaited = true
+
+	slog.Warn("cluster: rpc peer dropped during load, waiting for it to come back", "rpc_servers", launch.RPCServers, "failed", addr, "wait", s.rpcPeerWait)
+	start := time.Now()
+	down := s.awaitRPCPeers(req.ctx, addrs, s.rpcPeerWait)
+	waited := time.Since(start).Round(time.Millisecond)
+	if len(down) > 0 {
+		if addr == "" {
+			addr = down[0]
+		}
+		slog.Warn("cluster: rpc peer did not come back, not retrying with the same peers", "down", strings.Join(down, ","), "waited", waited)
+		return false, addr
+	}
+	if req.opts.RPCServers == "" {
+		req.rpcPin = &api.Runner{RPCServers: launch.RPCServers, TensorSplit: launch.TensorSplit}
+	}
+	slog.Warn("cluster: rpc peers are back, retrying the load once with the same peers", "rpc_servers", launch.RPCServers, "tensor_split", launch.TensorSplit, "waited", waited)
+	return true, ""
+}
+
+// awaitRPCPeers dials each of addrs with the RPC handshake every rpcPeerPoll
+// until all of them answer, wait has passed or ctx is done, and returns the
+// ones that have not answered. With wait 0 it dials once.
+func (s *Scheduler) awaitRPCPeers(ctx context.Context, addrs []string, wait time.Duration) []string {
+	deadline := time.Now().Add(wait)
+	down := addrs
+	for {
+		errs := make([]error, len(down))
+		var wg sync.WaitGroup
+		for i, addr := range down {
+			wg.Go(func() { errs[i] = s.dialRPCFn(strings.TrimSpace(addr)) })
+		}
+		wg.Wait()
+		var still []string
+		for i, err := range errs {
+			if err != nil {
+				still = append(still, down[i])
+			}
+		}
+		down = still
+
+		sleep := min(rpcPeerPoll, time.Until(deadline))
+		if len(down) == 0 || sleep <= 0 {
+			return down
+		}
+		select {
+		case <-ctx.Done():
+			return down
+		case <-time.After(sleep):
+		}
+	}
 }
 
 func (req *LlmRequest) reduceAutoNumCtxForLoadOOM(f *gguf.Model, numParallel int, completion bool, systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, launchOpts api.Options) (oldNumCtx, effectiveNumCtx, newNumCtx, oldNumBatch, newNumBatch int, ok bool) {
