@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/netip"
 	"slices"
 	"testing"
 	"time"
@@ -380,6 +381,63 @@ func TestResolveSeeds(t *testing.T) {
 	}
 	if addrs[1].String() != "192.168.1.42:50999" {
 		t.Errorf("addrs[1] = %v, want 192.168.1.42:50999", addrs[1])
+	}
+}
+
+// TestResolveSeedsIPv6 covers the bracketed IPv6 form ValidateSeeds already
+// accepts: it resolves (with "udp4" it didn't), and an IPv4 seed next to it
+// still resolves to the same address it did before. Literals only, so no
+// IPv6 interface or DNS is needed.
+func TestResolveSeedsIPv6(t *testing.T) {
+	addrs := resolveSeeds([]string{"[2001:db8::10]:11435", "192.0.2.10:11435", "[::ffff:192.0.2.11]:11435"})
+	if len(addrs) != 3 {
+		t.Fatalf("expected 3 resolved seeds, got %d: %v", len(addrs), addrs)
+	}
+	if want := netip.MustParseAddr("2001:db8::10"); addrs[0].AddrPort().Addr() != want || addrs[0].Port != 11435 {
+		t.Errorf("addrs[0] = %v, want [%v]:11435", addrs[0], want)
+	}
+	if addrs[0].String() != "[2001:db8::10]:11435" {
+		t.Errorf("addrs[0].String() = %q, want [2001:db8::10]:11435", addrs[0].String())
+	}
+	for i, want := range []string{"192.0.2.10", "192.0.2.11"} {
+		if ip4 := addrs[i+1].IP.To4(); ip4 == nil || ip4.String() != want || addrs[i+1].Port != 11435 {
+			t.Errorf("addrs[%d] = %v, want IPv4 %s:11435", i+1, addrs[i+1], want)
+		}
+	}
+}
+
+// TestProbePeerSkipsIPv6Candidates: the probe winner becomes the --rpc host,
+// so an IPv6 link-local candidate (it would need a zone) is never dialed, and
+// neither is any IPv6 one while llama.cpp RPC can't reach IPv6 (rpcIPv6).
+// fe80::1 isn't dialed at all, so this needs no IPv6 interface.
+func TestProbePeerSkipsIPv6Candidates(t *testing.T) {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("no loopback TCP available in this sandbox: %v", err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	p := Peer{ID: "p1", Addr: "fe80::1", Addrs: []string{"fe80::1", "fe80::1%eth0", "2001:db8::1", "127.0.0.1"}, RPCPort: port, LastSeen: time.Now()}
+	tbl := &Table{peers: map[string]Peer{"p1": p}}
+	probePeer(tbl, p)
+
+	if got := tbl.peers["p1"].Addr; got != "127.0.0.1" {
+		t.Fatalf("Addr = %q, want the IPv4 candidate", got)
+	}
+	for _, ip := range []string{"fe80::1", "fe80::1%eth0", "2001:db8::1"} {
+		if _, dialed := tbl.backoff["p1|"+ip]; dialed {
+			t.Errorf("%s was dialed (it has a backoff entry), want it skipped", ip)
+		}
 	}
 }
 

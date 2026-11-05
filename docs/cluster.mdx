@@ -426,6 +426,12 @@ per-model breakdown and caveats.
 - Cross-subnet discovery via `OLLAMA_CLUSTER_SEEDS` is implemented and
   unit-tested but has limited real-world mileage so far — same-subnet
   broadcast discovery is the well-exercised path.
+- IPv4 only. llama.cpp's RPC transport can't bind or connect over IPv6
+  yet, so discovery beacons, peer addresses and the RPC link all use IPv4,
+  and a machine needs an IPv4 address on the LAN to take part. A seed
+  written as `[2001:db8::10]:11435`, or a hostname with only IPv6 (AAAA)
+  records, is skipped with a warning in the server log. Ollama's own API
+  (`OLLAMA_HOST`) is not affected.
 - In the benchmark runs, `qwen3.8:27b` placed 0 of 66 layers on any GPU
   or peer, and why is not established. It offloads normally on a single
   machine, so it is not a limit of its hybrid SSM/attention architecture
