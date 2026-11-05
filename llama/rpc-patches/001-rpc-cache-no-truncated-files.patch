@@ -1,0 +1,66 @@
+rpc : do not leave or serve truncated cache files
+
+A failed or interrupted cache write left a short or empty file under the
+tensor's hash, which get_cached_file then served as a hit. Write to a temp
+file and rename it into place only after a successful write, and treat an
+empty or unreadable cache file as a miss.
+
+Upstream: https://github.com/ggml-org/llama.cpp/pull/30648 by TonyWu2333
+  (fixes ggml-org/llama.cpp#30633), PR head dd752b0706fe.
+  Only the ggml-rpc.cpp part is carried. The PR's test changes are left
+  out because this build does not compile llama.cpp's tests.
+  Not merged in b11963, b12111 or upstream master as of 2026-11-05.
+Tracking: borism/llama.cpp#2, borism/ollama-cluster#51
+
+diff --git a/ggml/src/ggml-rpc/ggml-rpc.cpp b/ggml/src/ggml-rpc/ggml-rpc.cpp
+index 8cedee7..0b393d3 100644
+--- a/ggml/src/ggml-rpc/ggml-rpc.cpp
++++ b/ggml/src/ggml-rpc/ggml-rpc.cpp
+@@ -1746,11 +1746,23 @@ bool rpc_server::set_tensor(const std::vector<uint8_t> & input) {
+         uint64_t hash = fnv_hash((const uint8_t*)data, size);
+         char hash_str[17];
+         snprintf(hash_str, sizeof(hash_str), "%016" PRIx64, hash);
+-        // save to cache_dir/hash_str
++        // save to cache_dir/hash_str, write to a temp file first so a failed write does not leave a bad entry
+         fs::path cache_file = fs::path(cache_dir) / hash_str;
+-        std::ofstream ofs(cache_file, std::ios::binary);
++        fs::path tmp_file = cache_file;
++        tmp_file += ".tmp";
++        std::ofstream ofs(tmp_file, std::ios::binary);
+         ofs.write((const char *)data, size);
+-        LOG_INFO("[%s] saved to '%s'\n", __func__, cache_file.string().c_str());
++        ofs.close();
++        std::error_code ec;
++        if (ofs) {
++            fs::rename(tmp_file, cache_file, ec);
++        }
++        if (!ofs || ec) {
++            LOG_WARN("[%s] failed to save '%s'\n", __func__, cache_file.string().c_str());
++            fs::remove(tmp_file, ec);
++        } else {
++            LOG_INFO("[%s] saved to '%s'\n", __func__, cache_file.string().c_str());
++        }
+     }
+     ggml_backend_tensor_set(tensor, data, offset, size);
+     return true;
+@@ -1826,15 +1838,15 @@ bool rpc_server::get_cached_file(uint64_t hash, std::vector<uint8_t> & data) {
+     snprintf(hash_str, sizeof(hash_str), "%016" PRIx64, hash);
+     fs::path cache_file = fs::path(cache_dir) / hash_str;
+     std::error_code ec;
+-    if (!fs::exists(cache_file, ec)) {
++    const uintmax_t size = fs::file_size(cache_file, ec);
++    if (ec || size == 0) {
+         return false;
+     }
+     std::ifstream ifs(cache_file, std::ios::binary);
+-    ifs.seekg(0, std::ios::end);
+-    size_t size = ifs.tellg();
+-    ifs.seekg(0, std::ios::beg);
+     data.resize(size);
+-    ifs.read((char *)data.data(), size);
++    if (!ifs.read((char *)data.data(), size)) {
++        return false;
++    }
+     return true;
+ }
+ 

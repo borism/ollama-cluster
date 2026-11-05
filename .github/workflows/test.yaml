@@ -46,6 +46,7 @@ jobs:
             'cmake/**/*' \
             'llama/server/**/*' \
             'llama/compat/**/*' \
+            'llama/rpc-patches/**/*' \
             'LLAMA_CPP_VERSION' \
             'MLX_VERSION' \
             'MLX_C_VERSION' \
@@ -77,6 +78,28 @@ jobs:
             -DGGML_OPENMP=OFF \
             -DGGML_CPU_ALL_VARIANTS=ON \
             -DOLLAMA_RUNNER_DIR=
+      - name: Verify llama/rpc-patches are still needed and applied
+        # The configure above skips a patch that is already in the source, so
+        # an RPC fix that upstream merged would linger unnoticed. Check each
+        # one on its own against the pinned tag (the index of the fetched
+        # checkout is still pristine), then that it is in the configured tree.
+        # Linux only: a CRLF checkout of the patches would not match the index.
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          src="$RUNNER_TEMP/llama-server-patch-check/_deps/llama_cpp-src"
+          tag=$(cat LLAMA_CPP_VERSION)
+          for p in llama/rpc-patches/*.patch; do
+            git -C "$src" apply --cached --check "$PWD/$p" || {
+              echo "::error file=$p::$p does not apply to $tag: drop it if upstream has the fix, else regenerate it (llama/rpc-patches/README.md)"
+              exit 1
+            }
+            git -C "$src" apply --reverse --check "$PWD/$p" || {
+              echo "::error file=$p::$p is not in the configured llama.cpp source"
+              exit 1
+            }
+            echo "$p: applies to $tag and is applied"
+          done
 
   linux:
     needs: [changes]
