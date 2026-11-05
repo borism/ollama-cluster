@@ -291,6 +291,39 @@ While it's down, the machine advertises itself as not sharing.
 A non-zero `CPU` share in `ollama ps` (see above) while cluster mode is on
 is the direct, visible confirmation this happened — not a bug.
 
+### Leaving a small shortfall on the CPU
+
+By default a model that misses the local GPU spills onto peers however small
+the shortfall. `OLLAMA_CLUSTER_MIN_SPILL` (off unless set) keeps it local
+instead when the shortfall, the predicted size minus the local GPUs' free
+memory, is at most that fraction of the model: llama-server then puts those
+few layers on the CPU. The server logs `cluster: shortfall is under
+OLLAMA_CLUSTER_MIN_SPILL` with `predicted`, `local`, `shortfall` and
+`cpu_share`. A request that sets `rpc_servers`, `rpc_auto: true` or its own
+`rpc_placement` is placed as before; the threshold only changes the server's
+default.
+
+It exists because of these runs on the 20 GB RTX A4500 head
+([#73](https://github.com/borism/ollama-cluster/issues/73)):
+
+| Model (layers on CPU locally) | Local only: gen / prompt tok/s | Cluster: gen / prompt tok/s |
+|---|---|---|
+| granite4.2:30b (2 of 65) | 20.3 / 705 | 20.5 / 398 |
+| qwen3.8:27b (2 of 66) | 27.5-32.2 / 728 | 33.7 / 380 |
+| gemma4:31b-it-qat (3 of 61) | 14.4, then out of memory (#72) | 16.8 / 359 |
+| qwen3.6:35b-a3b (MoE) | 59.7 / 606 | 73.7 / 863 |
+
+Prompt processing sends activations over the network at every device
+boundary, and the peers were slower at it, so for the dense models a few
+layers on the CPU cost less than the hop. The cluster wins clearly once a
+tenth or more of the model would be on the CPU.
+
+It is off because four models are not enough to pick a number: the MoE model
+was faster on the cluster, gemma4 ran out of memory locally, none of it was
+measured on a faster link, and the shortfall leaves out compute buffers, so a
+real local load puts somewhat more on the CPU than `cpu_share` says. The runs
+above suggest about `0.05`.
+
 ## RDMA over Thunderbolt (macOS)
 
 Peers talk over TCP by default. Two Apple silicon Macs connected directly by a
@@ -306,10 +339,11 @@ so RDMA and non-RDMA machines mix freely in one cluster. Set
 
 ## Environment variables
 
-Each of these (except `OLLAMA_CLUSTER_PORT`) can also be set with `ollama
-cluster on/off/set`, which saves it in the server's `~/.ollama/server.json`
-under the key in parentheses. An environment variable that is set always
-wins over the saved value; `ollama cluster status` shows which one applies.
+Each of these (except `OLLAMA_CLUSTER_PORT` and `OLLAMA_CLUSTER_MIN_SPILL`)
+can also be set with `ollama cluster on/off/set`, which saves it in the
+server's `~/.ollama/server.json` under the key in parentheses. An environment
+variable that is set always wins over the saved value; `ollama cluster status`
+shows which one applies.
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -319,6 +353,7 @@ wins over the saved value; `ollama cluster status` shows which one applies.
 | `OLLAMA_CLUSTER_SHARE_DEVICES` (`cluster_share_devices`) | all | Comma-separated ggml device names (`CUDA1`, `Vulkan0`) to share instead of every accelerator, passed to the worker as `-d` and the only devices peers see. |
 | `OLLAMA_CLUSTER_SEEDS` (`cluster_seeds`) | none | Comma-separated `host:port` list of peers to unicast directly to, for reaching machines outside this host's broadcast domain (a different subnet or VLAN — broadcast discovery doesn't cross those). Not needed on a flat LAN. |
 | `OLLAMA_CLUSTER_PLACEMENT` (`cluster_placement`) | `waterfill` | How candidate peers are chosen when more than one has spare capacity: `waterfill` weighs peers by measured load and latency and considers every usable one; `greedy` instead just ranks by free memory and adds peers until the shortfall's covered. With one local GPU, the model is then laid out local-first (see "Which peers get weights" below), so a candidate that isn't needed gets nothing and is dropped. |
+| `OLLAMA_CLUSTER_MIN_SPILL` | `0` (off) | Largest share of a model, from 0 to 1 (such as `0.05`), to leave on the CPU instead of spilling it onto peers; see "Leaving a small shortfall on the CPU" above. `0` always spills. Experimental: the right value isn't measured yet. |
 | `OLLAMA_CLUSTER_CACHE_GB` (`cluster_cache_gb`) | unset (no cap) | Cap on the tensor cache a sharing machine keeps in `~/.ollama/models/rpc/`: weights peers loaded onto it, so loading the same model again skips the network. Unset, the cache grows until the disk is down to its free-space floor, 5% of the volume, but never under 10 GiB or over 15 GiB; set, it is also held to that many GB. Either way the oldest files go first, checked every minute, and files that don't match their hash (a write cut short) are deleted. If the free space can't be read, an unset cap is treated as 32 GB for that check. A big download (`ollama pull`) that outruns the check can still use up the floor. `0` turns the cache off. |
 
 ## Per-request overrides

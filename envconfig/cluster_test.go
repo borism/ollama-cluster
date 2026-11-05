@@ -101,3 +101,27 @@ func TestUpdateServerConfigKeepsOtherKeys(t *testing.T) {
 		t.Error("NoCloud() = false after a cluster update, want the cloud setting kept")
 	}
 }
+
+// TestClusterMinSpill: off (0) unless set to a fraction from 0 to 1; anything
+// else falls back to 0, so a typo never stops the cluster from spilling.
+func TestClusterMinSpill(t *testing.T) {
+	for value, want := range map[string]float64{
+		"":       0,
+		"0":      0,
+		"0.05":   0.05,
+		" 0.1 ":  0.1,
+		"'0.07'": 0.07,
+		"1":      1,
+		"5%":     0,
+		"-0.1":   0,
+		"1.5":    0,
+		"NaN":    0,
+		"Inf":    0,
+		"abc":    0,
+	} {
+		t.Setenv("OLLAMA_CLUSTER_MIN_SPILL", value)
+		if got := ClusterMinSpill(); got != want {
+			t.Errorf("OLLAMA_CLUSTER_MIN_SPILL=%q: got %v, want %v", value, got, want)
+		}
+	}
+}

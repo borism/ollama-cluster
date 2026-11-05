@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -85,6 +86,25 @@ func ClusterCacheGB() (gb uint, ok bool) {
 		return *v, true
 	}
 	return 0, false
+}
+
+// ClusterMinSpill is the largest share of a model, from 0 to 1, that a
+// local-only load may leave on the CPU before cluster.SelectRPCServers spills
+// it onto peers instead (#73). 0, the default, always spills, as before. It
+// is read from the environment only, not from server.json: it is a
+// calibration knob until measurements settle a value. An unparsable value or
+// one outside 0-1 is ignored with a warning.
+func ClusterMinSpill() float64 {
+	s := Var("OLLAMA_CLUSTER_MIN_SPILL")
+	if s == "" {
+		return 0
+	}
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil || !(f >= 0 && f <= 1) { // the negated range also rejects NaN
+		slog.Warn("invalid environment variable, using default", "key", "OLLAMA_CLUSTER_MIN_SPILL", "value", s, "default", 0, "want", "a fraction from 0 to 1, such as 0.05")
+		return 0
+	}
+	return f
 }
 
 // ClusterSources reports where each cluster setting's value comes from:
