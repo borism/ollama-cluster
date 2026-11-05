@@ -225,6 +225,10 @@ func Start(ctx context.Context, cfg Config) (*Table, error) {
 		cfg.SelfID = randomID()
 	}
 
+	// IPv4 only, on purpose: llama.cpp's RPC transport can't bind or dial
+	// IPv6 yet (rpcIPv6), so a peer found over IPv6 alone could never serve
+	// a layer. IPv6 discovery (link-local multicast next to the broadcast,
+	// a dual-stack socket) waits for that, #34.
 	conn, err := net.ListenUDP("udp4", &net.UDPAddr{Port: cfg.Port})
 	if err != nil {
 		return nil, fmt.Errorf("cluster: listen udp :%d: %w", cfg.Port, err)
@@ -348,10 +352,15 @@ func broadcastAddrs(port int) []*net.UDPAddr {
 // addresses, logging and skipping any that fail to resolve rather than
 // failing Start outright -- a typo'd or momentarily-unreachable seed
 // shouldn't take down LAN broadcast discovery too.
+//
+// "udp", not "udp4", so "[2001:db8::10]:11435" and AAAA-only hostnames
+// resolve too. A hostname with both A and AAAA records still resolves to
+// its IPv4 address (ResolveUDPAddr prefers IPv4 unless given an IPv6
+// literal), so IPv4 seeds behave as before.
 func resolveSeeds(seeds []string) []*net.UDPAddr {
 	addrs := make([]*net.UDPAddr, 0, len(seeds))
 	for _, s := range seeds {
-		addr, err := net.ResolveUDPAddr("udp4", s)
+		addr, err := net.ResolveUDPAddr("udp", s)
 		if err != nil {
 			slog.Warn("cluster: could not resolve seed, skipping", "seed", s, "error", err)
 			continue
@@ -365,6 +374,10 @@ func resolveSeeds(seeds []string) []*net.UDPAddr {
 func broadcastLoop(ctx context.Context, conn *net.UDPConn, cfg Config, t *Table) {
 	ticker := time.NewTicker(cfg.Interval)
 	defer ticker.Stop()
+
+	// warned6 is the IPv6 seeds already logged, so one isn't warned about
+	// on every tick.
+	warned6 := map[string]bool{}
 
 	send := func() {
 		// Recomputed on every tick, not cached: a laptop that switches
@@ -390,6 +403,14 @@ func broadcastLoop(ctx context.Context, conn *net.UDPConn, cfg Config, t *Table)
 			return
 		}
 		for _, dst := range dsts {
+			if dst.IP.To4() == nil {
+				// conn is udp4 (see Start); only a seed can be IPv6.
+				if s := dst.String(); !warned6[s] {
+					warned6[s] = true
+					slog.Warn("cluster: skipping IPv6 seed, cluster mode is IPv4-only until llama.cpp RPC supports IPv6", "seed", s)
+				}
+				continue
+			}
 			if _, err := conn.WriteToUDP(buf, dst); err != nil {
 				slog.Debug("cluster: broadcast announcement", "dst", dst, "error", err)
 			}
@@ -481,7 +502,10 @@ func probePeer(t *Table, p Peer) {
 	due := 0
 	for _, ip := range candidates {
 		key := p.ID + "|" + ip
-		if !t.shouldProbe(key) {
+		// Whatever wins here becomes Peer.Addr and then the --rpc host, so
+		// an address --rpc can't take (an IPv6 link-local one, say) is
+		// never a candidate.
+		if rpcHostProblem(ip) != "" || !t.shouldProbe(key) {
 			continue
 		}
 		due++
