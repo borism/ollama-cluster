@@ -296,6 +296,24 @@ func TestUseMmapFormatParams(t *testing.T) {
 	}
 }
 
+func TestProjectorOption(t *testing.T) {
+	opts := DefaultOptions()
+	require.Nil(t, opts.Projector)
+
+	require.NoError(t, opts.FromMap(map[string]any{"projector": false}))
+	require.NotNil(t, opts.Projector)
+	assert.False(t, *opts.Projector)
+
+	require.NoError(t, opts.FromMap(map[string]any{"projector": true}))
+	assert.True(t, *opts.Projector)
+
+	require.Error(t, opts.FromMap(map[string]any{"projector": "no"}))
+
+	resp, err := FormatParams(map[string][]string{"projector": {"false"}})
+	require.NoError(t, err)
+	assert.Equal(t, false, *resp["projector"].(*bool))
+}
+
 func TestMainGPUFormatParams(t *testing.T) {
 	resp, err := FormatParams(map[string][]string{"main_gpu": {"0"}})
 	require.NoError(t, err)

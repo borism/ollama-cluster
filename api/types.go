@@ -635,6 +635,13 @@ type Runner struct {
 	// peers and their order are the server's choice, so the entries could not
 	// be tied to devices and the split is ignored (cluster.SelectRPCServers).
 	TensorSplit string `json:"tensor_split,omitempty"`
+	// Projector controls whether a model's multimodal projector (its vision
+	// or audio encoder, llama-server's --mmproj) is loaded. nil follows the
+	// server's OLLAMA_NO_PROJECTOR default, which loads it unless that is
+	// set; false loads the model text-only, so the projector takes no
+	// memory and requests with images or audio fail. A different value
+	// reloads the model, like num_ctx. See llm.ProjectorEnabled.
+	Projector *bool `json:"projector,omitempty"`
 }
 
 // SystemOneRequest is the request passed to [Client.SystemOne]. It asks a

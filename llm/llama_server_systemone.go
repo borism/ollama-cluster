@@ -19,6 +19,9 @@ func (s *llamaServerRunner) SystemOne(ctx context.Context, state, questions json
 		Images    []string        `json:"images,omitempty"`
 		Questions json.RawMessage `json:"questions"`
 	}{State: state, Questions: questions}
+	if err := s.textOnlyError(len(images) > 0, "send images"); err != nil {
+		return nil, nil, err
+	}
 	for _, image := range images {
 		data, err := llamaServerMediaBytes(image)
 		if err != nil {
