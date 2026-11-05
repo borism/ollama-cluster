@@ -324,6 +324,70 @@ measured on a faster link, and the shortfall leaves out compute buffers, so a
 real local load puts somewhat more on the CPU than `cpu_share` says. The runs
 above suggest about `0.05`.
 
+## Model formats and backends
+
+Not every GPU backend can compute every quantization format. On one machine
+that costs nothing: llama.cpp asks the backend, and layers it can't run go to
+the CPU. Over RPC it can't ask: at the bundled llama.cpp (b11963) the RPC
+protocol has no command for it and a remote device claims to support
+everything (`ggml_backend_rpc_device_supports_op` in `ggml-rpc.cpp`). The
+head would place the layers on the peer anyway, and the peer's
+`ggml-rpc-server` would abort at warm-up with `unsupported op 'MUL_MAT'`.
+
+So the head checks the model's tensor types against the backend each peer
+reports for its devices (`backend` in the beacon: `CUDA`, `ROCm`, `Metal`,
+`Vulkan`) before placing layers, using the table below, and leaves out the
+peers that can't run them, with a `cluster: not placing layers on a peer that
+cannot run this model's format` line in the server log naming the format, the
+peer and the reason. A peer that doesn't report a backend is used as before.
+Peers set by hand with `rpc_servers` aren't checked.
+
+| Format | Backend | Status |
+| --- | --- | --- |
+| NVFP4 | Metal | Peer left out. **Verified**: crashed a split at warm-up on llama.cpp b11845 ([#54](https://github.com/borism/ollama-cluster/issues/54)); b11963 still refuses it |
+| NVFP4 | CUDA | Runs. **Verified** on the head's own GPU, not yet on a CUDA peer |
+| NVFP4 | ROCm, Vulkan | Runs (source only) |
+| TQ1_0 | Metal, CUDA, ROCm | Peer left out (source only) |
+| TQ2_0 | CUDA, ROCm | Peer left out (source only) |
+| TQ1_0, TQ2_0 | Vulkan | Runs (source only) |
+| TQ2_0 | Metal | Runs (source only) |
+| MXFP4, IQ1_S to IQ4_XS | Metal, CUDA, ROCm, Vulkan | Runs (source only) |
+| Q4_1 | Metal | Runs. **Verified**: `flint:40b-a2b-q4_1` split between an NVIDIA head and an M2 Max peer |
+| K-quants (Q4_K) | Metal | Runs. **Verified**: `unsloth/flint-GGUF` `UD-Q4_K_XL` split between an NVIDIA head and an M2 Max peer |
+| BF16 | Metal | Depends on the GPU: refused where Metal has no bfloat support. Not checked before placing (source only) |
+
+"Source only" means read from the backend's `supports_op` at llama.cpp
+b11963 (`ggml-metal-device.m`, `ggml-cuda.cu`, which ROCm builds too, and
+`ggml-vulkan.cpp`), not run on that hardware. Formats not listed, such as
+Q4_0, Q8_0, F16 and the other K-quants, run on all four. The table lives in
+`cluster/capability.go`; a test fails when the bundled llama.cpp changes so it
+gets checked again.
+
+If a peer still aborts during a load (a format the table doesn't know about
+yet, or the worker died for another reason), the head's `llama-server` exits
+with `Remote RPC server crashed or returned malformed response`. The server
+then retries the load once without that peer, and logs `cluster: peer crashed
+during load, retrying without it`. llama.cpp doesn't say which peer crashed,
+so when several were in use all of them are left out of the retry. The reason
+itself (`unsupported op ...`) is only in the peer's own server log. When there
+is no retry (the request set `rpc_servers`, or the one retry was used), the
+error names the model's format, the peer, its backend and, where the table
+knows it, the reason.
+
+### NVFP4 models with a Mac in the cluster
+
+`flint:40b` (also tagged `latest`, `40b-a2b` and `40b-a2b-gguf-nvfp4`) is
+NVFP4, which Apple GPUs can't run. With a Mac as the only peer, its layers
+stay on the head's GPU and CPU. To use the Mac's GPU as well, pull the Q4_1
+build instead:
+
+```shell
+ollama pull flint:40b-a2b-q4_1
+```
+
+On an NVIDIA head with an M2 Max peer it loaded 41% on the head GPU, 59% on
+the Mac and 0% on CPU, and generated 51.7 tok/s.
+
 ## RDMA over Thunderbolt (macOS)
 
 Peers talk over TCP by default. Two Apple silicon Macs connected directly by a
@@ -420,6 +484,10 @@ per-model breakdown and caveats.
 ## Current limitations
 
 - Hub-and-spoke only (see above) — no multi-hop mesh across peers.
+- The head can't ask a peer which model formats it can run, so it uses a
+  fixed table instead (see [Model formats and
+  backends](#model-formats-and-backends)). NVFP4 models don't use Mac
+  peers.
 - Placement weighs each peer's self-reported load and a measured
   round-trip latency, not a real measured tokens/sec benchmark per device
   yet.
