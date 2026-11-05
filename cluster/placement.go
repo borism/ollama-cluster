@@ -228,8 +228,10 @@ func peersAt(usable []Peer, addrs []string) []Peer {
 
 // fillMargin is what a device keeps back from fillSplit for memory the split
 // does not count: the CUDA/Metal context, compute buffers and the vision
-// projector. Measured on a 20 GiB RTX A4500 (docs/cluster-benchmarks.mdx):
-// everything but weights and KV came to 0.5-2.6 GiB.
+// projector. Measured on a 20 GiB RTX A4500 with the two models that fit it
+// entirely, everything but weights and KV came to 1.2-3.6 GiB with flash
+// attention on (growing with context) and up to 6.1 GiB with it off; see
+// docs/cluster-benchmarks.mdx#vram-estimate-vs-measured-use-november-2026.
 const fillMargin = 3 << 30
 
 // fillSplit lays the model out for speed instead of for free memory: the
