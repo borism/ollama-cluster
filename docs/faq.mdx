@@ -368,6 +368,18 @@ How much the cache quantization impacts the model's response quality will depend
 
 You may need to experiment with different quantization types to find the best balance between memory usage and quality.
 
+## How can I load a vision model without its projector?
+
+Models with vision or audio input load a multimodal projector next to the text weights, which costs memory on every load even if no request carries an image. For text-only use, turn it off:
+
+- Per request: `"options": {"projector": false}` in `/api/generate` or `/api/chat`.
+- Per model: `PARAMETER projector false` in a Modelfile.
+- Server default: `OLLAMA_NO_PROJECTOR=1` when starting the Ollama server. A request or Modelfile that sets `projector` to `true` still loads it.
+
+llama-server then starts without `--mmproj`, and the log says `loading model text-only, without its multimodal projector`. A request with images or audio to a model loaded this way fails with an error that names the option. Changing the value reloads the model, like changing `num_ctx`.
+
+This works for projectors in a separate file and for ones stored inside the model's own GGUF: the text loader skips the inline projector tensors (`v.*`, `mm.*`, `a.*`) either way, and Ollama does not count them in its memory estimate when the projector is off.
+
 ## Where can I find my Ollama Public Key?
 
 Your **Ollama Public Key** is the public part of the key pair that lets your local Ollama instance talk to [ollama.com](https://ollama.com).

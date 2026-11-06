@@ -605,7 +605,7 @@ func (s *Scheduler) load(req *LlmRequest, systemInfo ml.SystemInfo, gpus []ml.De
 			}
 
 			predictedCtx := effectiveLlamaServerContext(req.opts.NumCtx, f, numParallel)
-			predicted := llm.PredictServerVRAM(req.model.ModelPath, f, predictedCtx, req.model.ProjectorPaths)
+			predicted := llm.PredictLaunchVRAM(req.model.ModelPath, f, predictedCtx, req.model.ProjectorPaths, req.opts)
 			reqOpts := req.opts
 			if table := s.clusterTable.Load(); table != nil && (reqOpts.RPCAuto == nil || *reqOpts.RPCAuto) {
 				peers := slices.DeleteFunc(slices.Clone(table.Peers()), func(p cluster.Peer) bool {
@@ -905,7 +905,7 @@ func (req *LlmRequest) reduceAutoNumCtxForLoadOOM(f *gguf.Model, numParallel int
 
 	req.opts.NumCtx = newNumCtx
 	predictedCtx := effectiveLlamaServerContext(req.opts.NumCtx, f, numParallel)
-	predictedVRAM := llm.PredictServerVRAM(req.model.ModelPath, f, predictedCtx, req.model.ProjectorPaths)
+	predictedVRAM := llm.PredictLaunchVRAM(req.model.ModelPath, f, predictedCtx, req.model.ProjectorPaths, req.opts)
 	available, _, _ := availableMemoryForPlacement(systemInfo, gpus, launchOpts)
 	req.applyAutomaticGenerationBatch(completion, predictedCtx, predictedVRAM, available, llm.LlamaServerFlashAttention(gpus), gpus)
 	newNumBatch = req.opts.NumBatch
@@ -1249,7 +1249,7 @@ func logSelectedGPUGroup(all, selected []ml.DeviceInfo) {
 
 func (s *Scheduler) applyLlamaServerMmapDefaults(req *LlmRequest, launchOpts api.Options, systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, f *gguf.Model, numParallel int) api.Options {
 	predictedCtx := effectiveLlamaServerContext(req.opts.NumCtx, f, numParallel)
-	predictedVRAM := llm.PredictServerVRAM(req.model.ModelPath, f, predictedCtx, req.model.ProjectorPaths)
+	predictedVRAM := llm.PredictLaunchVRAM(req.model.ModelPath, f, predictedCtx, req.model.ProjectorPaths, req.opts)
 	availableVRAM, _, _ := availableMemoryForPlacement(systemInfo, gpus, launchOpts)
 
 	if reason := disableMmapDefaultReason(runtime.GOOS, req.opts, gpus, f.KV().BlockCount(), predictedVRAM, availableVRAM); reason != "" {
@@ -1313,7 +1313,7 @@ func (s *Scheduler) maybeDisableMmapForHostPressure(req *LlmRequest, launchOpts 
 	modelSize := modelFileSize(req.model.modelPaths()...)
 	loadedMmapSize := s.loadedMmapModelSizeLocked()
 	predictedCtx := effectiveLlamaServerContext(req.opts.NumCtx, f, numParallel)
-	predictedVRAM := llm.PredictServerVRAM(req.model.ModelPath, f, predictedCtx, req.model.ProjectorPaths)
+	predictedVRAM := llm.PredictLaunchVRAM(req.model.ModelPath, f, predictedCtx, req.model.ProjectorPaths, req.opts)
 	availableVRAM, _, _ := availableMemoryForPlacement(systemInfo, gpus, launchOpts)
 	placementGpus := gpusForPlacement(gpus, launchOpts)
 
@@ -1527,6 +1527,10 @@ func (runner *runnerRef) needsReload(ctx context.Context, req *LlmRequest) bool 
 		optsExisting.NumGPU = -1
 		optsNew.NumGPU = -1
 	}
+	// nil and an explicit value that matches the server default launch the
+	// same llama-server, so compare what each one resolves to.
+	existingProjector, newProjector := llm.ProjectorEnabled(*runner.Options), llm.ProjectorEnabled(req.opts)
+	optsExisting.Projector, optsNew.Projector = &existingProjector, &newProjector
 
 	contextShift := req.contextShift
 	if req.model.ModelPath != "" {

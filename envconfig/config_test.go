@@ -203,6 +203,21 @@ func TestBool(t *testing.T) {
 	}
 }
 
+func TestNoProjector(t *testing.T) {
+	cases := map[string]bool{"": false, "0": false, "false": false, "1": true, "true": true}
+	for k, v := range cases {
+		t.Run(k, func(t *testing.T) {
+			t.Setenv("OLLAMA_NO_PROJECTOR", k)
+			if got := NoProjector(); got != v {
+				t.Errorf("OLLAMA_NO_PROJECTOR=%q: got %t, want %t", k, got, v)
+			}
+		})
+	}
+	if _, ok := AsMap()["OLLAMA_NO_PROJECTOR"]; !ok {
+		t.Error("OLLAMA_NO_PROJECTOR missing from AsMap")
+	}
+}
+
 func TestUint(t *testing.T) {
 	cases := map[string]uint{
 		"0":    0,
