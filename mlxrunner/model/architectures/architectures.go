@@ -1,6 +1,7 @@
 package architectures
 
 import (
+	_ "github.com/borism/ollama-cluster/mlxrunner/model/autotrustdecision"
 	_ "github.com/borism/ollama-cluster/mlxrunner/model/clef"
 	_ "github.com/borism/ollama-cluster/mlxrunner/model/cohere2_moe"
 	_ "github.com/borism/ollama-cluster/mlxrunner/model/d1"
