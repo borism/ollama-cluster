@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -2353,6 +2354,11 @@ func TestSchedLoadRetriesWithoutFailedRPCPeer(t *testing.T) {
 	port := ln.Addr().(*net.TCPAddr).Port
 	peerAddr := fmt.Sprintf("127.0.0.1:%d", port)
 
+	logs := &lockedBuffer{}
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
+	defer slog.SetDefault(old)
+
 	for _, secondFails := range []bool{false, true} {
 		ctx, done := context.WithTimeout(t.Context(), time.Second)
 		s := InitScheduler(ctx)
@@ -2391,9 +2397,34 @@ func TestSchedLoadRetriesWithoutFailedRPCPeer(t *testing.T) {
 			case <-time.After(time.Second):
 				t.Fatal("expected successful load")
 			}
+			// One placement line per attempt; the retry's still names the
+			// peer it left out, and why (#71).
+			out := logs.String()
+			require.Equal(t, 2, strings.Count(out, "cluster: placement"), out)
+			require.Contains(t, out, fmt.Sprintf("127.0.0.1 free=59.6 GiB rpc_port=%d", port), out)
+			require.Contains(t, out, "failed during the previous load", out)
 		}
 		done()
 	}
+}
+
+// lockedBuffer is a log sink the test can read while scheduler goroutines
+// may still write to it.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 func TestRetryWithoutFillSplit(t *testing.T) {
