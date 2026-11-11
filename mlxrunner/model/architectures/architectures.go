@@ -1,6 +1,7 @@
 package architectures
 
 import (
+	_ "github.com/borism/ollama-cluster/mlxrunner/model/autotrustdecision"
 	_ "github.com/borism/ollama-cluster/mlxrunner/model/clef"
 	_ "github.com/borism/ollama-cluster/mlxrunner/model/cohere2_moe"
 	_ "github.com/borism/ollama-cluster/mlxrunner/model/d1"
@@ -22,5 +23,6 @@ import (
 	_ "github.com/borism/ollama-cluster/mlxrunner/model/qwen3_5"
 	_ "github.com/borism/ollama-cluster/mlxrunner/model/qwen3_5_moe"
 	_ "github.com/borism/ollama-cluster/mlxrunner/model/qwen4_exp"
+	_ "github.com/borism/ollama-cluster/mlxrunner/model/ripple"
 	_ "github.com/borism/ollama-cluster/mlxrunner/model/strands"
 )
