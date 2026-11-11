@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"math"
@@ -444,6 +445,117 @@ func TestPlacementLogsCandidates(t *testing.T) {
 	SelectRPCServers([]ml.DeviceInfo{gpu(8000)}, mib(4000), []Peer{big}, api.Options{})
 	if buf.Len() != 0 {
 		t.Errorf("logged although the model fits locally:\n%s", buf.String())
+	}
+}
+
+// captureLog sends slog's default logger to the returned buffer until the
+// test ends.
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(old) })
+	return &buf
+}
+
+// TestReachablePlacementLogsOneLine: when a picked peer does not answer,
+// SelectReachableRPCServers picks again but logs one placement line for the
+// decision. That line names the dropped peer as unreachable and the peers
+// the caller skipped, each with why, largest first (#71).
+func TestReachablePlacementLogsOneLine(t *testing.T) {
+	t.Setenv("OLLAMA_CLUSTER_PLACEMENT", "greedy")
+	now := time.Now()
+	big := peerAt("10.0.0.2", 25600, 0, 0) // greedy's first pick, but its worker resets
+	big.LastSeen = now
+	small := peerAt("10.0.0.3", 12288, 0, 0)
+	small.LastSeen = now
+	quiet := peerAt("10.0.0.5", 30720, 0, 0)
+	quiet.LastSeen = now.Add(-20 * time.Second)
+	skipped := []Skipped{{Peer: quiet, Reason: "too old (no beacon in 15s)"}}
+	reset := errors.New("rpc hello: connection reset by peer")
+	dial := func(addr string) error {
+		if addr == "10.0.0.2:50052" {
+			return reset
+		}
+		return nil
+	}
+	gpus := []ml.DeviceInfo{gpu(2000)}
+
+	buf := captureLog(t)
+	got := SelectReachableRPCServers(gpus, mib(4000), []Peer{small, big}, api.Options{}, dial, skipped...)
+	if got.RPCServers != "10.0.0.3:50052" {
+		t.Fatalf("RPCServers = %q, want 10.0.0.3:50052", got.RPCServers)
+	}
+	out := buf.String()
+	if n := strings.Count(out, "cluster: placement"); n != 1 {
+		t.Fatalf("want one placement line for the decision, got %d:\n%s", n, out)
+	}
+	wants := []string{
+		"10.0.0.5 free=30.0 GiB rpc_port=50052", "beacon_age=20", "too old (no beacon in 15s)",
+		"10.0.0.2 free=25.0 GiB rpc_port=50052", "unreachable: rpc hello: connection reset by peer",
+		"10.0.0.3 free=12.0 GiB rpc_port=50052", "usable",
+		"rpc_servers=10.0.0.3:50052",
+	}
+	last := -1
+	for _, want := range wants {
+		i := strings.Index(out, want)
+		if i < 0 {
+			t.Fatalf("log lacks %q:\n%s", want, out)
+		}
+		if i < last {
+			t.Errorf("%q out of order (want largest peer first):\n%s", want, out)
+		}
+		last = i
+	}
+	if len(skipped) != 1 {
+		t.Errorf("the caller's skipped list was changed: %v", skipped)
+	}
+
+	// No peer answers: still one line, naming each peer, and nothing chosen.
+	buf.Reset()
+	got = SelectReachableRPCServers(gpus, mib(4000), []Peer{big}, api.Options{}, dial)
+	out = buf.String()
+	if got.RPCServers != "" || strings.Count(out, "cluster: placement") != 1 ||
+		!strings.Contains(out, "unreachable: rpc hello") || !strings.Contains(out, `rpc_servers=""`) {
+		t.Errorf("RPCServers = %q; want one line naming the unreachable peer and no rpc_servers:\n%s", got.RPCServers, out)
+	}
+}
+
+// TestDescribePeersBounded: a large fleet gets maxDescribed peers described,
+// largest first, and the rest counted by verdict without its details.
+func TestDescribePeersBounded(t *testing.T) {
+	var peers []Peer
+	for i := range 20 {
+		p := peerAt(fmt.Sprintf("10.0.1.%d", i), uint64(2000+i*100), 0, 0)
+		switch {
+		case i == 0:
+			p.ProtoMajor = RPCProtoMajor - 1
+		case i%2 == 1:
+			p.RPCPort = 0
+		}
+		peers = append(peers, p)
+	}
+	skipped := []Skipped{
+		{Peer: peerAt("10.0.2.1", 1000, 0, 0), Reason: "unreachable: connection refused"},
+		{Peer: peerAt("10.0.2.2", 1000, 0, 0), Reason: "unreachable: no route to host"},
+	}
+
+	got := describePeers(peers, skipped, time.Now())
+	if n := strings.Count(got, "beacon_age="); n != maxDescribed {
+		t.Errorf("described %d peers, want %d:\n%s", n, maxDescribed, got)
+	}
+	if !strings.HasPrefix(got, "10.0.1.19 ") {
+		t.Errorf("want the largest peer first:\n%s", got)
+	}
+	proto, _, _ := strings.Cut(peers[0].ProtoIncompatibility(), ":")
+	want := "; and 14 more: 6 not sharing (rpc_port 0), 1 " + proto + ", 2 unreachable, 5 usable"
+	if !strings.HasSuffix(got, want) {
+		t.Errorf("summary:\n%s\nwant it to end with:\n%s", got, want)
+	}
+
+	if got := describePeers(nil, nil, time.Now()); got != "none" {
+		t.Errorf("no peers: %q, want none", got)
 	}
 }
 
