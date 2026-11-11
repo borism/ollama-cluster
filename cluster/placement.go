@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"math"
 	"net"
 	"slices"
@@ -129,14 +130,49 @@ func waterFill(rates, links, caps []float64) []float64 {
 // device's reported free memory). The "waterfill" rate is a 0..1 headroom
 // score, not a measured tokens/sec.
 func SelectRPCServers(gpus []ml.DeviceInfo, predicted uint64, peers []Peer, opts api.Options) api.Options {
+	opts, d := selectRPCServers(gpus, predicted, peers, opts)
+	d.log(peers, nil, opts)
+	return opts
+}
+
+// Skipped is a peer the caller kept out of placement, and why (Table.Stale, a
+// peer that failed the previous load). Placement does not consider it; it is
+// only named on the placement log line, so a peer missing from the pick is
+// explained there too.
+type Skipped struct {
+	Peer   Peer
+	Reason string
+}
+
+// decision is what the placement log line reports besides the peers. It is
+// nil when there was nothing to decide: the caller set rpc_servers, or the
+// model fits locally.
+type decision struct {
+	predicted, local uint64
+	policy           string
+}
+
+// log writes the one INFO line per placement decision (#71).
+func (d *decision) log(peers []Peer, skipped []Skipped, opts api.Options) {
+	if d == nil {
+		return
+	}
+	slog.Info("cluster: placement", "predicted", format.HumanBytes2(d.predicted), "local", format.HumanBytes2(d.local),
+		"policy", d.policy, "candidates", describePeers(peers, skipped, time.Now()),
+		"rpc_servers", opts.RPCServers, "tensor_split", opts.TensorSplit)
+}
+
+// selectRPCServers is SelectRPCServers without the log line, so that
+// SelectReachableRPCServers logs once for all of its rounds.
+func selectRPCServers(gpus []ml.DeviceInfo, predicted uint64, peers []Peer, opts api.Options) (api.Options, *decision) {
 	if opts.RPCServers != "" {
-		return opts
+		return opts, nil
 	}
 	opts = ignoreTensorSplit(opts)
 
 	local := localAvailable(gpus)
 	if local >= predicted {
-		return opts
+		return opts, nil
 	}
 
 	usable := make([]Peer, 0, len(peers))
@@ -150,14 +186,9 @@ func SelectRPCServers(gpus []ml.DeviceInfo, predicted uint64, peers []Peer, opts
 	if policy == "" {
 		policy = envconfig.ClusterPlacement()
 	}
-	// One line per decision, so a peer that was left out can be explained.
-	defer func() {
-		slog.Info("cluster: placement", "predicted", format.HumanBytes2(predicted), "local", format.HumanBytes2(local),
-			"policy", policy, "candidates", describePeers(peers, time.Now()),
-			"rpc_servers", opts.RPCServers, "tensor_split", opts.TensorSplit)
-	}()
+	d := &decision{predicted: predicted, local: local, policy: policy}
 	if len(usable) == 0 {
-		return opts
+		return opts, d
 	}
 
 	var addrs []string
@@ -174,18 +205,21 @@ func SelectRPCServers(gpus []ml.DeviceInfo, predicted uint64, peers []Peer, opts
 			opts.TensorSplit = split
 		}
 	}
-	return opts
+	return opts, d
 }
 
-// describePeers is one log field naming every peer placement was handed with
-// its free memory, rpc_port, whether it was usable (and if not, why) and how
-// long ago its last beacon was.
-func describePeers(peers []Peer, now time.Time) string {
-	if len(peers) == 0 {
-		return "none"
-	}
-	parts := make([]string, len(peers))
-	for i, p := range peers {
+// maxDescribed caps how many peers the placement line describes one by one;
+// the rest are only counted by verdict, so a large fleet keeps it short.
+const maxDescribed = 8
+
+// describePeers is one log field naming every peer placement was handed, and
+// every peer the caller skipped, with its free memory, rpc_port, protocol, how
+// long ago its last beacon was and whether it was usable (and if not, why).
+// Largest first, the order placement prefers, so a big peer that was left out
+// leads the line.
+func describePeers(peers []Peer, skipped []Skipped, now time.Time) string {
+	all := make([]Skipped, 0, len(peers)+len(skipped))
+	for _, p := range peers {
 		verdict := "usable"
 		switch {
 		case p.RPCPort == 0:
@@ -195,12 +229,38 @@ func describePeers(peers []Peer, now time.Time) string {
 		case peerFreeMemory(p) < minUsefulMemory:
 			verdict = "under 1 GiB free"
 		}
+		all = append(all, Skipped{Peer: p, Reason: verdict})
+	}
+	all = append(all, skipped...)
+	if len(all) == 0 {
+		return "none"
+	}
+	sort.SliceStable(all, func(i, j int) bool { return peerFreeMemory(all[i].Peer) > peerFreeMemory(all[j].Peer) })
+
+	shown := all[:min(len(all), maxDescribed)]
+	parts := make([]string, 0, len(shown)+1)
+	for _, c := range shown {
+		p := c.Peer
 		age := "unknown"
 		if !p.LastSeen.IsZero() {
 			age = now.Sub(p.LastSeen).Round(100 * time.Millisecond).String()
 		}
-		parts[i] = fmt.Sprintf("%s free=%s rpc_port=%d proto=%d.%d beacon_age=%s: %s",
-			p.Addr, format.HumanBytes2(peerFreeMemory(p)), p.RPCPort, p.ProtoMajor, p.ProtoMinor, age, verdict)
+		parts = append(parts, fmt.Sprintf("%s free=%s rpc_port=%d proto=%d.%d beacon_age=%s: %s",
+			p.Addr, format.HumanBytes2(peerFreeMemory(p)), p.RPCPort, p.ProtoMajor, p.ProtoMinor, age, c.Reason))
+	}
+	if rest := all[len(shown):]; len(rest) > 0 {
+		// Counted by the verdict up to its first colon ("unreachable",
+		// "speaks RPC protocol 7.0, this node needs 8.0"), not its details.
+		counts := map[string]int{}
+		for _, c := range rest {
+			kind, _, _ := strings.Cut(c.Reason, ":")
+			counts[kind]++
+		}
+		kinds := slices.Sorted(maps.Keys(counts))
+		for i, k := range kinds {
+			kinds[i] = fmt.Sprintf("%d %s", counts[k], k)
+		}
+		parts = append(parts, fmt.Sprintf("and %d more: %s", len(rest), strings.Join(kinds, ", ")))
 	}
 	return strings.Join(parts, "; ")
 }
@@ -358,14 +418,21 @@ func rpcAddr(p Peer) string {
 // dial is DialRPC in production; it is a parameter so tests don't need real
 // listeners. It runs while the scheduler holds its load lock, which is why
 // it's bounded by probeTimeout plus rpcHelloTimeout.
-func SelectReachableRPCServers(gpus []ml.DeviceInfo, predicted uint64, peers []Peer, opts api.Options, dial func(addr string) error) api.Options {
+//
+// It logs one placement line for the whole decision, not one per round. That
+// line names the skipped peers the caller passed and the peers dropped here as
+// unreachable, each with why.
+func SelectReachableRPCServers(gpus []ml.DeviceInfo, predicted uint64, peers []Peer, opts api.Options, dial func(addr string) error, skipped ...Skipped) api.Options {
 	if opts.RPCServers != "" {
 		return opts
 	}
 	opts = ignoreTensorSplit(opts) // once, not on every round below
+	// Appended to below, so not the caller's array.
+	skipped = slices.Clone(skipped)
 	for {
-		picked := SelectRPCServers(gpus, predicted, peers, opts)
+		picked, d := selectRPCServers(gpus, predicted, peers, opts)
 		if picked.RPCServers == "" {
+			d.log(peers, skipped, picked)
 			return picked
 		}
 
@@ -377,18 +444,25 @@ func SelectReachableRPCServers(gpus []ml.DeviceInfo, predicted uint64, peers []P
 		}
 		wg.Wait()
 
-		unreachable := map[string]bool{}
+		unreachable := map[string]error{}
 		for i, err := range errs {
 			if err != nil {
 				slog.Warn("cluster: skipping unreachable peer", "addr", addrs[i], "error", err)
-				unreachable[addrs[i]] = true
+				unreachable[addrs[i]] = err
 			}
 		}
 		if len(unreachable) == 0 {
+			d.log(peers, skipped, picked)
 			return picked
 		}
 		// Terminates: every round removes at least one peer.
-		peers = slices.DeleteFunc(slices.Clone(peers), func(p Peer) bool { return unreachable[rpcAddr(p)] })
+		peers = slices.DeleteFunc(slices.Clone(peers), func(p Peer) bool {
+			err := unreachable[rpcAddr(p)]
+			if err != nil {
+				skipped = append(skipped, Skipped{Peer: p, Reason: "unreachable: " + err.Error()})
+			}
+			return err != nil
+		})
 	}
 }
 

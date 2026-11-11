@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -969,6 +970,42 @@ func TestSchedNeedsReload(t *testing.T) {
 	req.contextShift = true
 	resp = runner.needsReload(ctx, req)
 	require.True(t, resp)
+}
+
+func TestSchedNeedsReloadProjector(t *testing.T) {
+	ctx, done := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer done()
+
+	enabled, disabled := true, false
+	for _, c := range []struct {
+		name     string
+		env      string
+		existing *bool
+		request  *bool
+		want     bool
+	}{
+		{"both unset", "", nil, nil, false},
+		{"unset then off", "", nil, &disabled, true},
+		{"off then unset", "", &disabled, nil, true},
+		{"off then on", "", &disabled, &enabled, true},
+		{"off then off", "", &disabled, &disabled, false},
+		{"unset equals explicit on", "", nil, &enabled, false},
+		{"env off equals explicit off", "1", nil, &disabled, false},
+		{"env off then explicit on", "1", nil, &enabled, true},
+		{"explicit on then env off default", "1", &enabled, nil, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("OLLAMA_NO_PROJECTOR", c.env)
+			existing := api.DefaultOptions()
+			existing.Projector = c.existing
+			runner := &runnerRef{Options: &existing, llama: &mockLlm{vramByGPU: map[ml.DeviceID]uint64{}}, numParallel: 1}
+			m := &Model{ProjectorPaths: []string{"projector"}}
+			runner.model.Store(m)
+			req := &LlmRequest{model: m, opts: api.DefaultOptions()}
+			req.opts.Projector = c.request
+			require.Equal(t, c.want, runner.needsReload(ctx, req))
+		})
+	}
 }
 
 func TestResolveContextShift(t *testing.T) {
@@ -2353,6 +2390,11 @@ func TestSchedLoadRetriesWithoutFailedRPCPeer(t *testing.T) {
 	port := ln.Addr().(*net.TCPAddr).Port
 	peerAddr := fmt.Sprintf("127.0.0.1:%d", port)
 
+	logs := &lockedBuffer{}
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
+	defer slog.SetDefault(old)
+
 	for _, secondFails := range []bool{false, true} {
 		ctx, done := context.WithTimeout(t.Context(), time.Second)
 		s := InitScheduler(ctx)
@@ -2391,9 +2433,34 @@ func TestSchedLoadRetriesWithoutFailedRPCPeer(t *testing.T) {
 			case <-time.After(time.Second):
 				t.Fatal("expected successful load")
 			}
+			// One placement line per attempt; the retry's still names the
+			// peer it left out, and why (#71).
+			out := logs.String()
+			require.Equal(t, 2, strings.Count(out, "cluster: placement"), out)
+			require.Contains(t, out, fmt.Sprintf("127.0.0.1 free=59.6 GiB rpc_port=%d", port), out)
+			require.Contains(t, out, "failed during the previous load", out)
 		}
 		done()
 	}
+}
+
+// lockedBuffer is a log sink the test can read while scheduler goroutines
+// may still write to it.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 func TestRetryWithoutFillSplit(t *testing.T) {

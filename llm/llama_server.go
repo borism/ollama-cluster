@@ -209,6 +209,9 @@ type llamaServerLaunchConfig struct {
 	gpuLibs              []string
 	extraEnvs            map[string]string
 	forceNoMMProjOffload bool
+	// skippedProjector is the projector left out because the projector
+	// option was off (see skipProjector); empty when none was skipped.
+	skippedProjector string
 }
 
 func newLlamaServerHTTPClient() *http.Client {
@@ -913,6 +916,7 @@ func NewLlamaServerRunner(
 		compatClipArches[arch] {
 		projectors = []string{modelPath}
 	}
+	projectors, skippedProjector := skipProjector(modelPath, projectors, opts)
 	mmprojMemory, err := mmprojMemoryRequirement(modelPath, f, projectors)
 	if err != nil {
 		return nil, err
@@ -968,6 +972,8 @@ func NewLlamaServerRunner(
 		gpus:         slices.Clone(gpus),
 		gpuLibs:      slices.Clone(gpuLibs),
 		extraEnvs:    cloneStringMap(serverEnvs),
+
+		skippedProjector: skippedProjector,
 	}
 
 	s := &llamaServerRunner{
@@ -1643,6 +1649,9 @@ type llamaServerTokenProb struct {
 
 func (s *llamaServerRunner) Completion(ctx context.Context, req CompletionRequest, fn func(CompletionResponse)) error {
 	slog.Debug("llama-server completion request", "media", len(req.Media), "prompt_len", len(req.Prompt))
+	if err := s.textOnlyError(len(req.Media) > 0, "send images or audio"); err != nil {
+		return err
+	}
 
 	if req.Options == nil {
 		opts := api.DefaultOptions()
@@ -2273,6 +2282,9 @@ func (s *llamaServerRunner) llamaServerChatRequest(req ChatRequest, stream bool)
 
 	messages := make([]map[string]any, 0, len(req.Messages))
 	for _, msg := range req.Messages {
+		if err := s.textOnlyError(len(msg.Images) > 0, "send images or audio"); err != nil {
+			return nil, err
+		}
 		converted, err := llamaServerChatMessage(MessageFromAPI(msg))
 		if err != nil {
 			return nil, err
@@ -2474,6 +2486,9 @@ func (s *llamaServerRunner) Embedding(ctx context.Context, input string, media [
 
 	var prompt any = input
 	if len(media) > 0 {
+		if err := s.textOnlyError(true, "embed images or audio"); err != nil {
+			return nil, 0, err
+		}
 		if len(s.launch.projectors) == 0 {
 			return nil, 0, api.StatusError{StatusCode: http.StatusNotImplemented, ErrorMessage: "model does not support media embeddings"}
 		}
