@@ -972,6 +972,42 @@ func TestSchedNeedsReload(t *testing.T) {
 	require.True(t, resp)
 }
 
+func TestSchedNeedsReloadProjector(t *testing.T) {
+	ctx, done := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer done()
+
+	enabled, disabled := true, false
+	for _, c := range []struct {
+		name     string
+		env      string
+		existing *bool
+		request  *bool
+		want     bool
+	}{
+		{"both unset", "", nil, nil, false},
+		{"unset then off", "", nil, &disabled, true},
+		{"off then unset", "", &disabled, nil, true},
+		{"off then on", "", &disabled, &enabled, true},
+		{"off then off", "", &disabled, &disabled, false},
+		{"unset equals explicit on", "", nil, &enabled, false},
+		{"env off equals explicit off", "1", nil, &disabled, false},
+		{"env off then explicit on", "1", nil, &enabled, true},
+		{"explicit on then env off default", "1", &enabled, nil, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("OLLAMA_NO_PROJECTOR", c.env)
+			existing := api.DefaultOptions()
+			existing.Projector = c.existing
+			runner := &runnerRef{Options: &existing, llama: &mockLlm{vramByGPU: map[ml.DeviceID]uint64{}}, numParallel: 1}
+			m := &Model{ProjectorPaths: []string{"projector"}}
+			runner.model.Store(m)
+			req := &LlmRequest{model: m, opts: api.DefaultOptions()}
+			req.opts.Projector = c.request
+			require.Equal(t, c.want, runner.needsReload(ctx, req))
+		})
+	}
+}
+
 func TestResolveContextShift(t *testing.T) {
 	trueValue := true
 	falseValue := false

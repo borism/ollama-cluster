@@ -242,6 +242,9 @@ var (
 	NoCloudEnv = Bool("OLLAMA_NO_CLOUD")
 	// CreateRemote forces model creation through the server API even when the server is local.
 	CreateRemote = Bool("OLLAMA_CREATE_REMOTE")
+	// NoProjector loads models text-only by default, without their multimodal
+	// projector; the "projector" option overrides it per request or model.
+	NoProjector = Bool("OLLAMA_NO_PROJECTOR")
 )
 
 func String(s string) func() string {
@@ -336,6 +339,7 @@ func AsMap() map[string]EnvVar {
 		"OLLAMA_NO_CLOUD":             {"OLLAMA_NO_CLOUD", NoCloud(), "Disable Ollama cloud features (remote inference and web search)"},
 		"OLLAMA_NOHISTORY":            {"OLLAMA_NOHISTORY", NoHistory(), "Do not preserve readline history"},
 		"OLLAMA_NOPRUNE":              {"OLLAMA_NOPRUNE", NoPrune(), "Do not prune model blobs on startup"},
+		"OLLAMA_NO_PROJECTOR":         {"OLLAMA_NO_PROJECTOR", NoProjector(), "Load models text-only, without their vision/audio projector, unless a request or Modelfile sets \"projector\": true"},
 		"OLLAMA_NUM_PARALLEL":         {"OLLAMA_NUM_PARALLEL", NumParallel(), "Maximum number of parallel requests"},
 		"OLLAMA_ORIGINS":              {"OLLAMA_ORIGINS", AllowedOrigins(), "A comma separated list of allowed origins"},
 		"OLLAMA_SCHED_SPREAD":         {"OLLAMA_SCHED_SPREAD", SchedSpread(), "Always schedule model across all GPUs"},

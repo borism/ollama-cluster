@@ -28,6 +28,9 @@ func (s *llamaServerRunner) Speech(ctx context.Context, req SpeechRequest, fn fu
 	if req.Prompter == nil {
 		return api.StatusError{StatusCode: http.StatusNotImplemented, ErrorMessage: "this model does not support speech"}
 	}
+	if err := s.textOnlyError(true, "use speech"); err != nil {
+		return err
+	}
 	if len(s.launch.projectors) == 0 {
 		return api.StatusError{StatusCode: http.StatusNotImplemented, ErrorMessage: "this model was created without its projector, which holds the speech codec; recreate it with the mmproj to use speech"}
 	}
