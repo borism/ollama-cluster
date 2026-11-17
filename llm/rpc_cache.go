@@ -16,7 +16,7 @@ import (
 )
 
 // ggml-rpc-server's -c tensor cache (tools/rpc/rpc-server.cpp and
-// ggml/src/ggml-rpc/ggml-rpc.cpp, checked at b11081) stores each weight
+// ggml/src/ggml-rpc/ggml-rpc.cpp, checked at b12257) stores each weight
 // tensor over 10 MiB as <dir>/<16 hex digits>, named by the 64-bit FNV-1a
 // hash of its bytes, and never deletes anything. It doesn't check its own
 // writes either: a full disk or a worker killed mid-write leaves a short
