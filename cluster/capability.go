@@ -12,7 +12,7 @@ import (
 // weightsTableTag is the llama.cpp tag unsupportedWeights was read from.
 // TestUnsupportedWeightsMatchesPin fails when LLAMA_CPP_VERSION moves, so a
 // sync re-reads the functions each entry names and updates the table.
-const weightsTableTag = "b11963"
+const weightsTableTag = "b12257"
 
 // unsupportedWeight is one ggml tensor type a peer's backend refuses to
 // compute. Over RPC the head never finds out: ggml-rpc.cpp's
@@ -36,6 +36,7 @@ type unsupportedWeight struct {
 var unsupportedWeights = []unsupportedWeight{
 	{"Metal", "NVFP4", "ggml_metal_supports_mul_mat_op in ggml-metal-device.m"},
 	{"Metal", "TQ1_0", "ggml_metal_supports_mul_mat_op in ggml-metal-device.m"},
+	{"Metal", "F8_E4M3", "ggml_metal_supports_mul_mat_op in ggml-metal-device.m"},
 	{"CUDA", "TQ1_0", "MUL_MAT in ggml_backend_cuda_device_supports_op, ggml-cuda.cu"},
 	{"CUDA", "TQ2_0", "MUL_MAT in ggml_backend_cuda_device_supports_op, ggml-cuda.cu"},
 	// ggml-hip compiles ggml-cuda.cu, so ROCm shares CUDA's supports_op.

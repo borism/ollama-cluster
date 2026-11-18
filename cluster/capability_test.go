@@ -144,7 +144,7 @@ func TestAnnouncementCarriesBackend(t *testing.T) {
 
 // A sync PR that bumps LLAMA_CPP_VERSION must re-read the functions named in
 // unsupportedWeights at the new tag (and the Vulkan supports_op, which
-// refuses no weight type at b11963), update the table and docs/cluster.mdx
+// refuses no weight type at b12257), update the table and docs/cluster.mdx
 // ("Model formats and backends"), then weightsTableTag.
 func TestUnsupportedWeightsMatchesPin(t *testing.T) {
 	b, err := os.ReadFile("../LLAMA_CPP_VERSION")

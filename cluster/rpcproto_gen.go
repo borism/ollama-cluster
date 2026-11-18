@@ -10,7 +10,7 @@ package cluster
 // advertise them and placement only pairs peers whose major matches and whose
 // minor is no higher than ours.
 const (
-	RPCLlamaCppTag = "b12177"
-	RPCProtoMajor  = 8
+	RPCLlamaCppTag = "b12257"
+	RPCProtoMajor  = 9
 	RPCProtoMinor  = 0
 )

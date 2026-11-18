@@ -184,8 +184,8 @@ mark the peer "incompatible" with the same text:
 ```
 Incompatible peers (discovered but never used):
 ID      ADDRESS   VERSION           REASON
-node-a  10.0.0.2  unknown           speaks RPC protocol 7.0, this node needs 8.0: upgrade the peer to match
-node-b  10.0.0.3  0.40.8-cluster.1  speaks RPC protocol 9.0, this node needs 8.0: upgrade this node to match
+node-a  10.0.0.2  unknown           speaks RPC protocol 8.0, this node needs 9.0: upgrade the peer to match
+node-b  10.0.0.3  0.41.0-cluster.1  speaks RPC protocol 10.0, this node needs 9.0: upgrade this node to match
 ```
 
 VERSION is the peer's build version. Builds that predate this feature don't
@@ -332,7 +332,7 @@ about 0.03-0.05.
 
 Not every GPU backend can compute every quantization format. On one machine
 that costs nothing: llama.cpp asks the backend, and layers it can't run go to
-the CPU. Over RPC it can't ask: at the bundled llama.cpp (b11963) the RPC
+the CPU. Over RPC it can't ask: at the bundled llama.cpp (b12257) the RPC
 protocol has no command for it and a remote device claims to support
 everything (`ggml_backend_rpc_device_supports_op` in `ggml-rpc.cpp`). The
 head would place the layers on the peer anyway, and the peer's
@@ -348,10 +348,11 @@ Peers set by hand with `rpc_servers` aren't checked.
 
 | Format | Backend | Status |
 | --- | --- | --- |
-| NVFP4 | Metal | Peer left out. **Verified**: crashed a split at warm-up on llama.cpp b11845 ([#54](https://github.com/borism/ollama-cluster/issues/54)); b11963 still refuses it |
+| NVFP4 | Metal | Peer left out. **Verified**: crashed a split at warm-up on llama.cpp b11845 ([#54](https://github.com/borism/ollama-cluster/issues/54)); b12257 still refuses it |
 | NVFP4 | CUDA | Runs. **Verified** on the head's own GPU, not yet on a CUDA peer |
 | NVFP4 | ROCm, Vulkan | Runs (source only) |
 | TQ1_0 | Metal, CUDA, ROCm | Peer left out (source only) |
+| F8_E4M3 | Metal | Peer left out (source only; new in b12257) |
 | TQ2_0 | CUDA, ROCm | Peer left out (source only) |
 | TQ1_0, TQ2_0 | Vulkan | Runs (source only) |
 | TQ2_0 | Metal | Runs (source only) |
@@ -361,7 +362,7 @@ Peers set by hand with `rpc_servers` aren't checked.
 | BF16 | Metal | Depends on the GPU: refused where Metal has no bfloat support. Not checked before placing (source only) |
 
 "Source only" means read from the backend's `supports_op` at llama.cpp
-b11963 (`ggml-metal-device.m`, `ggml-cuda.cu`, which ROCm builds too, and
+b12257 (`ggml-metal-device.m`, `ggml-cuda.cu`, which ROCm builds too, and
 `ggml-vulkan.cpp`), not run on that hardware. Formats not listed, such as
 Q4_0, Q8_0, F16 and the other K-quants, run on all four. The table lives in
 `cluster/capability.go`; a test fails when the bundled llama.cpp changes so it

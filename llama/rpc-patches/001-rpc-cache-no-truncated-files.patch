@@ -17,14 +17,15 @@ Upstream: https://github.com/ggml-org/llama.cpp/pull/30648 by TonyWu2333
   Only the ggml-rpc.cpp part is carried, plus the hash check above. The
   PR's test changes are left out because this build does not compile
   llama.cpp's tests.
-  Not merged in b11963, b12111 or upstream master as of 2026-11-05.
+  Not merged in b11963, b12111, b12257 or upstream master as of 2026-11-18.
 Tracking: borism/llama.cpp#2, borism/ollama-cluster#51
 
 diff --git a/ggml/src/ggml-rpc/ggml-rpc.cpp b/ggml/src/ggml-rpc/ggml-rpc.cpp
+index e4a84cb..5f12110 100644
 --- a/ggml/src/ggml-rpc/ggml-rpc.cpp
 +++ b/ggml/src/ggml-rpc/ggml-rpc.cpp
-@@ -1746,11 +1746,23 @@ bool rpc_server::set_tensor(const std::vector<uint8_t> & input) {
-         uint64_t hash = fnv_hash((const uint8_t*)data, size);
+@@ -1806,11 +1806,23 @@ bool rpc_server::set_tensor(socket_ptr sock, uint64_t input_size) {
+         uint64_t hash = fnv_hash(data.data(), size);
          char hash_str[17];
          snprintf(hash_str, sizeof(hash_str), "%016" PRIx64, hash);
 -        // save to cache_dir/hash_str
@@ -34,7 +35,7 @@ diff --git a/ggml/src/ggml-rpc/ggml-rpc.cpp b/ggml/src/ggml-rpc/ggml-rpc.cpp
 +        fs::path tmp_file = cache_file;
 +        tmp_file += ".tmp";
 +        std::ofstream ofs(tmp_file, std::ios::binary);
-         ofs.write((const char *)data, size);
+         ofs.write((const char *)data.data(), size);
 -        LOG_INFO("[%s] saved to '%s'\n", __func__, cache_file.string().c_str());
 +        ofs.close();
 +        std::error_code ec;
@@ -47,10 +48,10 @@ diff --git a/ggml/src/ggml-rpc/ggml-rpc.cpp b/ggml/src/ggml-rpc/ggml-rpc.cpp
 +        } else {
 +            LOG_INFO("[%s] saved to '%s'\n", __func__, cache_file.string().c_str());
 +        }
+         ggml_backend_tensor_set(tensor, data.data(), offset, size);
+         return true;
      }
-     ggml_backend_tensor_set(tensor, data, offset, size);
-     return true;
-@@ -1826,15 +1838,20 @@ bool rpc_server::get_cached_file(uint64_t hash, std::vector<uint8_t> & data) {
+@@ -1901,15 +1913,20 @@ bool rpc_server::get_cached_file(uint64_t hash, std::vector<uint8_t> & data) {
      snprintf(hash_str, sizeof(hash_str), "%016" PRIx64, hash);
      fs::path cache_file = fs::path(cache_dir) / hash_str;
      std::error_code ec;
