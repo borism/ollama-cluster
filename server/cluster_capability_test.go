@@ -196,7 +196,9 @@ func TestSchedLoadRetriesWithoutCrashedRPCPeer(t *testing.T) {
 		s.load(scenario.req, getSystemInfoFn(), []ml.DeviceInfo{{DeviceID: ml.DeviceID{Library: "CUDA"}}}, false)
 
 		if explicit {
-			require.Equal(t, []string{addr}, launched)
+			// Its own rpc_servers: the peer gets the same-peer retry (#82)
+			// but is never left out.
+			require.Equal(t, []string{addr, addr}, launched)
 			select {
 			case err := <-scenario.req.errCh:
 				require.ErrorIs(t, err, rpcCrashErr)
@@ -210,7 +212,9 @@ func TestSchedLoadRetriesWithoutCrashedRPCPeer(t *testing.T) {
 				t.Fatal("expected an error")
 			}
 		} else {
-			require.Equal(t, []string{addr, ""}, launched)
+			// The peer is retried once as it was (it may only have restarted,
+			// #82); when the crash recurs it is left out.
+			require.Equal(t, []string{addr, addr, ""}, launched)
 			select {
 			case <-scenario.req.successCh:
 			case err := <-scenario.req.errCh:
