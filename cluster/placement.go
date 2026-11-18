@@ -174,6 +174,10 @@ func selectRPCServers(gpus []ml.DeviceInfo, predicted uint64, peers []Peer, opts
 	if local >= predicted {
 		return opts, nil
 	}
+	// Short by only a few layers: those stay on the CPU (OLLAMA_CLUSTER_MIN_SPILL).
+	if keepLocal(local, predicted, opts) {
+		return opts, nil
+	}
 
 	usable := make([]Peer, 0, len(peers))
 	for _, p := range peers {
