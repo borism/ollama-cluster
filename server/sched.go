@@ -44,8 +44,8 @@ type LlmRequest struct {
 	// evict-all-and-retry. Prevents infinite retry on persistent load failures.
 	oomRetryAttempted bool
 
-	// excludeRPC holds peers (host:port) that failed to connect during load;
-	// non-empty means the single peer retry has been used.
+	// excludeRPC holds peers (host:port) that failed to connect or crashed
+	// during load; non-empty means the single peer retry has been used.
 	excludeRPC map[string]bool
 	// noFillSplit drops the --tensor-split cluster.SelectRPCServers chose,
 	// after a load that used it ran out of memory (an explicit split turns
@@ -617,6 +617,9 @@ func (s *Scheduler) load(req *LlmRequest, systemInfo ml.SystemInfo, gpus []ml.De
 					}
 					return failed
 				})
+				if reqOpts.RPCServers == "" {
+					peers = cluster.ExcludeIncompatiblePeers(gpus, predicted, peers, clusterModelFormat(f))
+				}
 				reqOpts = cluster.SelectReachableRPCServers(gpus, predicted, peers, reqOpts, cluster.DialRPC, skipped...)
 				// With peers picked here the request has no usable split of its
 				// own: one it set without rpc_servers was dropped by
@@ -741,6 +744,26 @@ func (s *Scheduler) load(req *LlmRequest, systemInfo ml.SystemInfo, gpus []ml.De
 			slog.Warn("cluster: peer failed during load, retrying without it", "addr", addr)
 			req.excludeRPC = map[string]bool{addr: true}
 			return s.load(req, systemInfo, gpus, requireFull)
+		}
+
+		// A peer's ggml-rpc-server can also abort mid-load, e.g. "unsupported
+		// op" at warm-up for a tensor type the compatibility table doesn't
+		// know its backend refuses. Name the format, peer and reason, and
+		// retry once without the peer(s); only for peers we picked ourselves.
+		if crashed := crashedRPCPeers(err.Error(), launchOpts.RPCServers); len(crashed) > 0 {
+			var peers []cluster.Peer
+			if table := s.clusterTable.Load(); table != nil {
+				peers = table.Peers()
+			}
+			err = explainRPCCrash(err, crashed, peers, clusterModelFormat(f))
+			if req.opts.RPCServers == "" && len(req.excludeRPC) == 0 {
+				slog.Warn("cluster: peer crashed during load, retrying without it", "peers", crashed, "error", err)
+				req.excludeRPC = make(map[string]bool, len(crashed))
+				for _, addr := range crashed {
+					req.excludeRPC[addr] = true
+				}
+				return s.load(req, systemInfo, gpus, requireFull)
+			}
 		}
 
 		if retryWithoutFillSplit(launchOpts, req, err) {
