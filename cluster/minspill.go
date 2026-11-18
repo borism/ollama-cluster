@@ -31,9 +31,9 @@ func localCPUShare(local, predicted uint64) (shortfall uint64, share float64) {
 
 // keepLocal reports whether SelectRPCServers should load a model that misses
 // the local GPUs only by a little without peers, leaving those few layers on
-// the CPU (#73): local-only was as fast at generation and about twice as fast
-// at prompt processing as the cluster for models 2-3 layers short. The limit
-// is envconfig.ClusterMinSpill; at 0 (the default) it never does.
+// the CPU (#73): for models 2-3 layers short, local-only processed prompts
+// about twice as fast as the cluster but generated up to 19 % slower. That is a trade, not a win, so the limit
+// (envconfig.ClusterMinSpill) is opt-in: at 0, the default, it never does.
 //
 // A request that asks for the cluster itself, with rpc_auto true or its own
 // rpc_placement, is spilled as before: the threshold is a server-wide default
