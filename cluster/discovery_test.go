@@ -1,7 +1,6 @@
 package cluster
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -10,7 +9,6 @@ import (
 	"net/netip"
 	"slices"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -460,25 +458,6 @@ func TestProbePeerIPv6Only(t *testing.T) {
 	if len(tbl.backoff) != 0 {
 		t.Errorf("an IPv6 candidate was dialed (backoff entries: %v), want none", tbl.backoff)
 	}
-}
-
-// lockedBuffer is a log sink that discovery goroutines can write while the
-// test reads it.
-type lockedBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (b *lockedBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
-}
-
-func (b *lockedBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
 }
 
 // TestBroadcastLoopIPv6OnlySeed: with an IPv6 seed as the only seed, the
