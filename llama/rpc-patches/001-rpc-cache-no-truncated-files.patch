@@ -5,15 +5,22 @@ tensor's hash, which get_cached_file then served as a hit. Write to a temp
 file and rename it into place only after a successful write, and treat an
 empty or unreadable cache file as a miss.
 
+A file that is already short (written by an older rpc-server, or cut by a
+crash or a full disk) is still non-empty and readable, so also check it
+against its name: the file is named by the FNV-1a hash of its content, so a
+hash mismatch is a miss and the tensor is sent again. This last check is
+local to this fork and not in the upstream PR; it costs one hash pass over
+each cached tensor that is served.
+
 Upstream: https://github.com/ggml-org/llama.cpp/pull/30648 by TonyWu2333
   (fixes ggml-org/llama.cpp#30633), PR head dd752b0706fe.
-  Only the ggml-rpc.cpp part is carried. The PR's test changes are left
-  out because this build does not compile llama.cpp's tests.
+  Only the ggml-rpc.cpp part is carried, plus the hash check above. The
+  PR's test changes are left out because this build does not compile
+  llama.cpp's tests.
   Not merged in b11963, b12111 or upstream master as of 2026-11-05.
 Tracking: borism/llama.cpp#2, borism/ollama-cluster#51
 
 diff --git a/ggml/src/ggml-rpc/ggml-rpc.cpp b/ggml/src/ggml-rpc/ggml-rpc.cpp
-index 8cedee7..0b393d3 100644
 --- a/ggml/src/ggml-rpc/ggml-rpc.cpp
 +++ b/ggml/src/ggml-rpc/ggml-rpc.cpp
 @@ -1746,11 +1746,23 @@ bool rpc_server::set_tensor(const std::vector<uint8_t> & input) {
@@ -43,7 +50,7 @@ index 8cedee7..0b393d3 100644
      }
      ggml_backend_tensor_set(tensor, data, offset, size);
      return true;
-@@ -1826,15 +1838,15 @@ bool rpc_server::get_cached_file(uint64_t hash, std::vector<uint8_t> & data) {
+@@ -1826,15 +1838,20 @@ bool rpc_server::get_cached_file(uint64_t hash, std::vector<uint8_t> & data) {
      snprintf(hash_str, sizeof(hash_str), "%016" PRIx64, hash);
      fs::path cache_file = fs::path(cache_dir) / hash_str;
      std::error_code ec;
@@ -59,6 +66,11 @@ index 8cedee7..0b393d3 100644
      data.resize(size);
 -    ifs.read((char *)data.data(), size);
 +    if (!ifs.read((char *)data.data(), size)) {
++        return false;
++    }
++    // the file is named by the FNV-1a hash of its content: a short or damaged file is a miss
++    if (fnv_hash(data.data(), size) != hash) {
++        LOG_WARN("[%s] cache file '%s' does not match its hash, ignoring it\n", __func__, cache_file.string().c_str());
 +        return false;
 +    }
      return true;

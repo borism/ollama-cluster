@@ -21,7 +21,7 @@ is already applied (`git apply --reverse --check`).
 
 | Patch | Fix | Upstream | Tracking |
 |---|---|---|---|
-| `001-rpc-cache-no-truncated-files.patch` | A failed or interrupted cache write left a short or empty file that was then served as a cache hit. | [ggml-org/llama.cpp#30648](https://github.com/ggml-org/llama.cpp/pull/30648) (fixes #30633) | borism/llama.cpp#2 |
+| `001-rpc-cache-no-truncated-files.patch` | A failed or interrupted cache write left a short or empty file that was then served as a cache hit. Also checks a cached file against its name (its content hash) before serving it, so a short file already on disk is re-sent; that check is not in the upstream PR and costs about 1 s per GiB served. | [ggml-org/llama.cpp#30648](https://github.com/ggml-org/llama.cpp/pull/30648) (fixes #30633) | borism/llama.cpp#2 |
 | `002-rpc-accept-retry-transient-errors.patch` | One failed `accept()` (a client that reset first, `EINTR`, `EMFILE`) ended the whole rpc-server process. | not submitted yet | borism/llama.cpp#3, #82 |
 
 ## Adding a patch
