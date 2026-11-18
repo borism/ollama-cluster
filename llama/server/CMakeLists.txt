@@ -132,6 +132,9 @@ endif()
 # apply the patch by hand while iterating on the compat layer.
 set(_ollama_compat_patch_cmd "")
 include(${CMAKE_CURRENT_SOURCE_DIR}/../compat/compat.cmake)
+# Fork-carried llama.cpp RPC fixes, applied after the compat patch wherever
+# it is applied (llama/rpc-patches/README.md).
+include(${CMAKE_CURRENT_SOURCE_DIR}/../rpc-patches/rpc-patches.cmake)
 option(OLLAMA_LLAMA_CPP_SKIP_COMPAT_PATCH
     "Skip llama.cpp compat patch application because the source is already prepared"
     OFF)
@@ -156,8 +159,19 @@ elseif(NOT DEFINED ENV{OLLAMA_LLAMA_CPP_SOURCE})
                 "Failed to apply Ollama llama.cpp compat patch to "
                 "${_llama_cpp_source_override}")
         endif()
+        execute_process(
+            COMMAND ${OLLAMA_LLAMA_CPP_RPC_PATCH_COMMAND}
+            WORKING_DIRECTORY "${_llama_cpp_source_override}"
+            RESULT_VARIABLE _ollama_rpc_patch_result
+        )
+        if(NOT _ollama_rpc_patch_result EQUAL 0)
+            message(FATAL_ERROR
+                "Failed to apply llama/rpc-patches to "
+                "${_llama_cpp_source_override}")
+        endif()
     else()
         set(_ollama_compat_patch_cmd PATCH_COMMAND ${OLLAMA_LLAMA_CPP_COMPAT_PATCH_COMMAND})
+        list(APPEND _ollama_compat_patch_cmd COMMAND ${OLLAMA_LLAMA_CPP_RPC_PATCH_COMMAND})
     endif()
 endif()
 
