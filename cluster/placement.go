@@ -8,6 +8,7 @@ import (
 	"maps"
 	"math"
 	"net"
+	"net/netip"
 	"slices"
 	"sort"
 	"strconv"
@@ -54,7 +55,7 @@ func peerFreeMemory(p Peer) uint64 {
 }
 
 func usablePeer(p Peer) bool {
-	return p.RPCPort != 0 && p.ProtoIncompatibility() == "" &&
+	return p.RPCPort != 0 && p.ProtoIncompatibility() == "" && rpcHostProblem(p.Addr) == "" &&
 		peerFreeMemory(p) >= minUsefulMemory
 }
 
@@ -174,6 +175,10 @@ func selectRPCServers(gpus []ml.DeviceInfo, predicted uint64, peers []Peer, opts
 	if local >= predicted {
 		return opts, nil
 	}
+	// Short by only a few layers: those stay on the CPU (OLLAMA_CLUSTER_MIN_SPILL).
+	if keepLocal(local, predicted, opts) {
+		return opts, nil
+	}
 
 	usable := make([]Peer, 0, len(peers))
 	for _, p := range peers {
@@ -226,6 +231,8 @@ func describePeers(peers []Peer, skipped []Skipped, now time.Time) string {
 			verdict = "not sharing (rpc_port 0)"
 		case p.ProtoIncompatibility() != "":
 			verdict = p.ProtoIncompatibility()
+		case rpcHostProblem(p.Addr) != "":
+			verdict = rpcHostProblem(p.Addr)
 		case peerFreeMemory(p) < minUsefulMemory:
 			verdict = "under 1 GiB free"
 		}
@@ -288,8 +295,10 @@ func peersAt(usable []Peer, addrs []string) []Peer {
 
 // fillMargin is what a device keeps back from fillSplit for memory the split
 // does not count: the CUDA/Metal context, compute buffers and the vision
-// projector. Measured on a 20 GiB RTX A4500 (docs/cluster-benchmarks.mdx):
-// everything but weights and KV came to 0.5-2.6 GiB.
+// projector. Measured on a 20 GiB RTX A4500 with the two models that fit it
+// entirely, everything but weights and KV came to 1.2-3.6 GiB with flash
+// attention on (growing with context) and up to 6.1 GiB with it off; see
+// docs/cluster-benchmarks.mdx#vram-estimate-vs-measured-use-november-2026.
 const fillMargin = 3 << 30
 
 // fillSplit lays the model out for speed instead of for free memory: the
@@ -401,9 +410,43 @@ func selectWaterFill(usable []Peer, shortfall uint64) []string {
 	return addrs
 }
 
-// rpcAddr is how a peer's ggml-rpc-server appears in --rpc.
+// rpcAddr is how a peer's ggml-rpc-server appears in --rpc. JoinHostPort
+// brackets an IPv6 host ("[2001:db8::1]:50052"); usablePeer keeps a peer at
+// an address --rpc can't take (rpcHostProblem) from ever getting here.
 func rpcAddr(p Peer) string {
-	return fmt.Sprintf("%s:%d", p.Addr, p.RPCPort)
+	return net.JoinHostPort(p.Addr, strconv.Itoa(p.RPCPort))
+}
+
+// rpcIPv6 is whether llama.cpp's RPC transport at LLAMA_CPP_VERSION can
+// reach an IPv6 address. It can't (#34): socket_t::connect and
+// socket_t::create_server in ggml/src/ggml-rpc/transport.cpp open AF_INET
+// sockets (via gethostbyname and inet_addr), and parse_endpoint in
+// ggml-rpc.cpp splits "host:port" at the first ':', so even
+// "[2001:db8::1]:50052" doesn't parse. Flip it once the pin handles IPv6.
+const rpcIPv6 = false
+
+// rpcHostProblem returns "" if host, a peer address, can go into --rpc, else
+// why not. llama-server aborts the whole load on an --rpc endpoint it can't
+// parse or reach, so discovery never probes such an address (probePeer) and
+// placement never picks a peer at one (usablePeer). Only IP literals are
+// judged; a hostname is left to llama.cpp to resolve, as before.
+func rpcHostProblem(host string) string {
+	ip, err := netip.ParseAddr(host)
+	if err != nil {
+		return ""
+	}
+	ip = ip.Unmap()
+	switch {
+	case ip.Is4():
+		return "" // IPv4 link-local (169.254/16) included: it needs no zone
+	case ip.IsLinkLocalUnicast() || ip.Zone() != "":
+		// fe80::/10 only means something together with a zone
+		// ("fe80::1%en0"), and --rpc has no way to carry one.
+		return "IPv6 link-local address, which --rpc can't use"
+	case !rpcIPv6:
+		return "IPv6 address, which llama.cpp RPC can't reach yet"
+	}
+	return ""
 }
 
 // SelectReachableRPCServers is SelectRPCServers, but checks that every peer

@@ -1,0 +1,62 @@
+rpc : retry accept() on transient errors instead of ending the server
+
+socket_t::accept() returned nullptr on any accept() failure, and the serve
+loop in ggml_backend_rpc_start_server then returned, so one client that
+reset before it was accepted (ECONNABORTED), a signal (EINTR) or a moment
+without file descriptors (EMFILE / ENFILE) ended the whole rpc-server
+process with exit status 0. Retry the first two, back off 100 ms on the
+others, and log the error code each time. Any other error still fails as
+before, now with its code in the log.
+
+Upstream: not submitted yet.
+Tracking: borism/llama.cpp#3, borism/ollama-cluster#51, borism/ollama-cluster#82
+
+diff --git a/ggml/src/ggml-rpc/transport.cpp b/ggml/src/ggml-rpc/transport.cpp
+index d5670f3..a3657b8 100644
+--- a/ggml/src/ggml-rpc/transport.cpp
++++ b/ggml/src/ggml-rpc/transport.cpp
+@@ -17,10 +17,13 @@
+ #  include <netdb.h>
+ #  include <unistd.h>
+ #endif
++#include <cerrno>
++#include <chrono>
+ #include <cstdlib>
+ #include <cstring>
+ #include <mutex>
+ #include <optional>
++#include <thread>
+ 
+ #ifdef GGML_RPC_RDMA
+ #  include <infiniband/verbs.h>
+@@ -715,8 +718,28 @@ static bool set_reuse_addr(sockfd_t sockfd) {
+ 
+ socket_ptr socket_t::accept() {
+     auto client_socket_fd = ::accept(pimpl->fd, NULL, NULL);
+-    if (!is_valid_fd(client_socket_fd)) {
+-        return nullptr;
++    while (!is_valid_fd(client_socket_fd)) {
++        // these errors are about the pending connection or the process, not the listening
++        // socket, so retry instead of failing, which ends the server
++#ifdef _WIN32
++        const int  err     = WSAGetLastError();
++        const bool retry   = err == WSAEINTR || err == WSAECONNRESET;
++        const bool backoff = err == WSAEMFILE;
++#else
++        const int  err     = errno;
++        const bool retry   = err == EINTR || err == ECONNABORTED;
++        const bool backoff = err == EMFILE || err == ENFILE;
++#endif
++        if (!retry && !backoff) {
++            LOG_ERROR("[%s] accept failed with error %d\n", __func__, err);
++            return nullptr;
++        }
++        LOG_WARN("[%s] accept failed with error %d, retrying\n", __func__, err);
++        if (backoff) {
++            // out of file descriptors, give them a moment to be released
++            std::this_thread::sleep_for(std::chrono::milliseconds(100));
++        }
++        client_socket_fd = ::accept(pimpl->fd, NULL, NULL);
+     }
+     if (!set_no_delay(client_socket_fd)) {
+         LOG_ERROR("Failed to set TCP_NODELAY\n");

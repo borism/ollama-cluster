@@ -124,6 +124,10 @@ var errorPrefixes = []string{
 	"signal arrived during cgo execution",
 	"llama_init_from_model:",
 	"Failed to connect to",
+	// ggml-rpc.cpp's abort when a peer's ggml-rpc-server dies mid-load
+	// (server/cluster.go's crashedRPCPeers and server/sched.go's
+	// rpcPeerDropped look for it).
+	"Remote RPC server crashed",
 }
 
 var outOfMemorySubstrings = []string{

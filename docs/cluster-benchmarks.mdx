@@ -4,8 +4,12 @@ title: Cluster benchmarks
 
 Real numbers from a live LAN fleet running the `v0.34.4-cluster.1` release
 build — no simulation, no synthetic harness. Every model was already on the
-head node's disk; each cell below is one real `/api/generate` request against
-`ollama serve` with `OLLAMA_CLUSTER=1`.
+head node's disk; each cell in the sections up to the placement study is one
+real `/api/generate` request against `ollama serve` with `OLLAMA_CLUSTER=1`.
+The [placement study](#placement-study-october-2026) and the
+[VRAM measurements](#vram-estimate-vs-measured-use-november-2026) ran later
+builds and state their own setup; the VRAM measurements used one GPU with
+cluster mode off.
 
 ## Fleet
 
@@ -431,6 +435,475 @@ and processes the prompt at 278 against 149 tok/s.
 - The qwen3-coder rows of the older table where waterfill beat greedy were not
   rerun. A hint that they are noise: the rows quoted in #11 for one cell were 25.9 /
   60.2 / 45.8 tok/s across three repeats.
+
+## VRAM estimate vs. measured use, November 2026
+
+How wrong is the head-GPU memory estimate, and is the 3 GiB `fillMargin`
+(`cluster/placement.go`, [#69](https://github.com/borism/ollama-cluster/pull/69))
+the right size? Context: [#72](https://github.com/borism/ollama-cluster/issues/72)
+(`gemma4:31b-it-qat` fits by estimate but ran out of CUDA memory on a 5k
+prompt), [#73](https://github.com/borism/ollama-cluster/issues/73) and
+[#81](https://github.com/borism/ollama-cluster/issues/81). Nothing here
+involves a peer: it is one RTX A4500 20 GB on Linux, alone, with cluster mode
+off (unlike the fleet sections at the top of this page).
+
+### Method
+
+- A separate `ollama serve` of the installed `0.40.11-cluster.1` binary on a
+  separate port, cluster mode off (no peers, no RPC workers), models read
+  from the existing store (read only). It was restarted once per cache setting: `f16`,
+  `q8_0`, `q4_0` with flash attention on, and `f16` with it off. The GPU was
+  otherwise idle (1.6-1.8 GiB used by the desktop session and other small processes,
+  recorded as "Idle" for every row).
+- Nine models, every context x every cache setting (108 cells). Each cell:
+  unload, read idle, load with an 8-token request (`num_ctx` set), read memory
+  after the answer ("Loaded"), then one measured request of up to 128
+  generated tokens (the short and maximum-context requests generated all 128,
+  the 5k-prompt requests ended after 32-110), `temperature` 0, `seed` 42,
+  `stream: false`. `nvidia-smi` was polled every 200 ms from the start of the
+  load to the end of the request; "Peak" is the largest of the polled samples
+  and the Loaded reading. In 4 rows the Loaded reading is above every polled
+  sample, so Peak equals Loaded. In 6 rows the polled maximum during the
+  request stayed below the Loaded reading, so `req_growth_mib` (that maximum
+  minus Loaded) is negative, by 14-187 MiB. Either memory was released after
+  the Loaded reading, or that reading caught a short spike the 200 ms poll
+  did not; which of the two was not determined. One sample per cell.
+- Contexts: 8192 with a 40-57 token prompt, 8192 with a 4.5-5.0k token prompt
+  (`prompt_eval_count` 4509-5005), and the model's maximum (`context_length`
+  in `/api/show`), falling back to 65536 if the maximum did not load.
+- **Estimate** is `llm.PredictServerVRAM` from this branch's base (weights file
+  plus separate projector file plus KV at the cache type), computed offline
+  from each model's GGUF header. The server does not log its estimate. The
+  installed `0.40.11` build still has the older f16-only formula without the
+  projector, so the scheduling decisions in these runs came from that one;
+  the table compares the measured numbers with the current estimate.
+- **llama.cpp need** is what llama-server itself projected for putting every
+  layer on the GPU (`common_params_fit_impl: projected to use N MiB`, from the
+  server log) plus the separate projector file. It is llama.cpp's own number,
+  not a measurement.
+- **Peak-idle-est** is measured peak minus idle minus estimate, filled in only
+  where all weights ended up on the GPU. Positive means the estimate was too
+  low. Rows with partial offload have no such number; use "llama.cpp need"
+  there.
+- All values are MiB. The raw per-run data, including buffer sizes parsed
+  from the log, is in
+  [`cluster-benchmarks-vram.csv`](./cluster-benchmarks-vram.csv), next to
+  this page; its columns are listed under [CSV columns](#csv-columns). The
+  isolated reruns of the `qwen3.6` `q4_0` OOM (see Findings) are not in it.
+  The llama-server logs the buffer sizes were parsed from are not in the
+  repository.
+
+`flint:40b-a2b-q4_1`, `nemotron-3.5-lightning` and `nemotron-3.5-bolt` are
+larger than the card (24, 24 and 20.5 GiB of weights, the last with a 1.6 GiB projector); they
+always run with some layers or MoE expert tensors on the CPU, so their tokens
+per second are not fits-in-VRAM numbers. `qwen3.6:35b-a3b-mtp` (20 GiB plus a projector) is in
+the same position. "Outcome: stopped: host RAM" means the run was stopped by
+the harness when the machine's free RAM fell under 1.5 GiB (the KV
+cache for the CPU layers did not fit in RAM); it is not a CUDA failure. A
+load that needed the fallback to the projector on the CPU is marked
+"projector retried on CPU": the first llama-server start died with a CUDA
+out-of-memory error while loading the projector, and the server restarted it
+with the projector on the CPU. For those rows "Peak" includes the failed first
+start.
+
+### Results
+
+#### `gemma4:31b-it-qat`
+
+| Context | Cache | FA | Prompt tok | Outcome | GPU layers | Estimate | llama.cpp need | Idle | Loaded | Peak | Peak-idle-est | Load s | Prompt t/s | Gen t/s |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| short (8192) | f16 | 1 | 54 | ok, projector retried on CPU | 50/61 (partial) | 19818 | 19980 | 1605 | 17529 | 18925 |  | 99.7 | 76 | 9.5 |
+| short (8192) | q8_0 | 1 | 54 | ok | 57/61 (partial) | 18956 | 19121 | 1605 | 19942 | 19964 |  | 45.3 | 99 | 15.7 |
+| short (8192) | q4_0 | 1 | 52 | ok, projector retried on CPU | 54/61 (partial) | 18496 | 18661 | 1605 | 17499 | 18839 |  | 82.2 | 98 | 12.7 |
+| short (8192) | f16 | 0 | 51 | ok, projector retried on CPU | 47/61 (partial) | 19818 | 20792 | 1605 | 17365 | 18833 |  | 83.1 | 29 | 8.0 |
+| 5k prompt (8192) | f16 | 1 | 4513 | ok, projector retried on CPU | 50/61 (partial) | 19818 | 19980 | 1605 | 17529 | 19098 |  | 70.5 | 415 | 8.0 |
+| 5k prompt (8192) | q8_0 | 1 | 4514 | ok | 57/61 (partial) | 18956 | 19121 | 1605 | 19923 | 19978 |  | 38.5 | 628 | 15.5 |
+| 5k prompt (8192) | q4_0 | 1 | 4512 | ok, projector retried on CPU | 54/61 (partial) | 18496 | 18661 | 1793 | 17499 | 19004 |  | 73.6 | 549 | 11.4 |
+| 5k prompt (8192) | f16 | 0 | 4514 | ok, projector retried on CPU | 47/61 (partial) | 19818 | 20792 | 1605 | 17365 | 18833 |  | 25.1 | 263 | 5.8 |
+| max (262144) | f16 | 1 |  | stopped: host RAM | 20/61 (partial) | 39658 | 40068 | 1605 |  | 8084 |  |  |  |  |
+| max (65536) | f16 | 1 | 52 | ok | 42/61 (partial) | 24298 | 24516 | 1605 | 19932 | 19942 |  | 56.5 | 46 | 6.6 |
+| max (262144) | q8_0 | 1 | 54 | ok, projector retried on CPU | 25/61 (partial) | 29496 | 31893 | 1605 | 17556 | 19156 |  | 71.8 | 27 | 3.9 |
+| max (262144) | q4_0 | 1 |  | OOM during prompt | 36/61 (partial) | 24076 | 26473 | 1605 | 19933 | 19975 |  | 28.8 |  |  |
+| max (65536) | q4_0 | 1 | 54 | ok, projector retried on CPU | 48/61 (partial) | 19756 | 20425 | 1605 | 17537 | 19186 |  | 42.5 | 63 | 8.6 |
+| max (262144) | f16 | 0 |  | stopped: host RAM | 0/61 (partial) | 39658 | 66920 | 1635 |  | 2010 |  |  |  |  |
+| max (65536) | f16 | 0 | 53 | ok, projector retried on CPU | 24/61 (partial) | 24298 | 31208 | 1635 | 17319 | 18903 |  | 28.6 | 18 | 3.7 |
+
+#### `granite4.2:30b`
+
+| Context | Cache | FA | Prompt tok | Outcome | GPU layers | Estimate | llama.cpp need | Idle | Loaded | Peak | Peak-idle-est | Load s | Prompt t/s | Gen t/s |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| short (8192) | f16 | 1 | 53 | ok | 59/65 (partial) | 18948 | 18956 | 1605 | 19170 | 19170 |  | 42.2 | 116 | 14.0 |
+| short (8192) | q8_0 | 1 | 53 | ok | 62/65 (partial) | 17988 | 17996 | 1605 | 19182 | 19182 |  | 42.4 | 184 | 17.5 |
+| short (8192) | q4_0 | 1 | 53 | ok | 63/65 (partial) | 17476 | 17484 | 1621 | 18787 | 18974 |  | 43.1 | 304 | 18.0 |
+| short (8192) | f16 | 0 | 54 | ok | 58/65 (partial) | 18948 | 19296 | 1601 | 19057 | 19230 |  | 42.2 | 131 | 12.9 |
+| 5k prompt (8192) | f16 | 1 | 4997 | ok | 59/65 (partial) | 18948 | 18956 | 1605 | 19170 | 19194 |  | 31.1 | 581 | 11.1 |
+| 5k prompt (8192) | q8_0 | 1 | 5000 | ok | 62/65 (partial) | 17988 | 17996 | 1605 | 18995 | 19206 |  | 32.1 | 676 | 16.0 |
+| 5k prompt (8192) | q4_0 | 1 | 4999 | ok | 63/65 (partial) | 17476 | 17484 | 1605 | 18787 | 18994 |  | 32.1 | 726 | 18.7 |
+| 5k prompt (8192) | f16 | 0 | 4997 | ok | 58/65 (partial) | 18948 | 19296 | 1601 | 19043 | 19390 |  | 31.7 | 470 | 11.4 |
+| max (131072) | f16 | 1 |  | stopped: host RAM | 21/65 (partial) | 49668 | 49796 | 1605 |  | 7309 |  |  |  |  |
+| max (65536) | f16 | 1 | 53 | ok | 33/65 (partial) | 33284 | 33348 | 1605 | 18881 | 19068 |  | 36.4 | 37 | 4.6 |
+| max (131072) | q8_0 | 1 | 54 | ok | 31/65 (partial) | 34308 | 34764 | 1605 | 18981 | 19168 |  | 30.7 | 37 | 4.4 |
+| max (131072) | q4_0 | 1 | 53 | ok | 41/65 (partial) | 26116 | 26572 | 1605 | 18943 | 19130 |  | 25.6 | 50 | 5.8 |
+| max (131072) | f16 | 0 |  | stopped: host RAM | 11/65 (partial) | 49668 | 57936 | 1601 |  | 4828 |  |  |  |  |
+| max (65536) | f16 | 0 | 53 | ok | 25/65 (partial) | 33284 | 37328 | 1601 | 19029 | 19216 |  | 32.6 | 20 | 3.8 |
+
+#### `qwen3.8:27b`
+
+| Context | Cache | FA | Prompt tok | Outcome | GPU layers | Estimate | llama.cpp need | Idle | Loaded | Peak | Peak-idle-est | Load s | Prompt t/s | Gen t/s |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| short (8192) | f16 | 1 | 53 | ok | 63/66 (partial) | 17582 | 17799 | 1605 | 19161 | 19348 |  | 43.5 | 144 | 24.5 |
+| short (8192) | q8_0 | 1 | 52 | ok | 64/66 (partial) | 17342 | 17559 | 1605 | 19366 | 19366 |  | 43.5 | 170 | 25.6 |
+| short (8192) | q4_0 | 1 | 52 | ok | 65/66 (partial) | 17214 | 17431 | 1605 | 19307 | 19494 |  | 43.2 | 198 | 29.9 |
+| short (8192) | f16 | 0 | 53 | ok | 61/66 (partial) | 17582 | 18459 | 1601 | 19083 | 19138 |  | 43.7 | 53 | 17.6 |
+| 5k prompt (8192) | f16 | 1 | 4607 | ok | 63/66 (partial) | 17582 | 17799 | 1605 | 19161 | 19358 |  | 32.2 | 694 | 34.8 |
+| 5k prompt (8192) | q8_0 | 1 | 4607 | ok | 64/66 (partial) | 17342 | 17559 | 1605 | 19179 | 19372 |  | 32.6 | 752 | 39.4 |
+| 5k prompt (8192) | q4_0 | 1 | 4607 | ok | 65/66 (partial) | 17214 | 17431 | 1605 | 19307 | 19500 |  | 32.7 | 798 | 38.8 |
+| 5k prompt (8192) | f16 | 0 | 4607 | ok | 61/66 (partial) | 17582 | 18459 | 1601 | 19083 | 19496 |  | 31.7 | 541 | 13.3 |
+| max (262144) | f16 | 1 |  | stopped: host RAM | 26/66 (partial) | 33454 | 35105 | 1605 |  | 14714 |  |  |  |  |
+| max (65536) | f16 | 1 | 51 | ok | 50/66 (partial) | 21166 | 21665 | 1605 | 19173 | 19346 |  | 19.5 | 28 | 9.2 |
+| max (262144) | q8_0 | 1 | 51 | ok | 34/66 (partial) | 25774 | 28407 | 1605 | 19302 | 19458 |  | 25.5 | 28 | 5.0 |
+| max (262144) | q4_0 | 1 | 53 | ok | 42/66 (partial) | 21678 | 24311 | 1605 | 19377 | 19566 |  | 27.7 | 38 | 6.7 |
+| max (262144) | f16 | 0 |  | stopped: host RAM | 0/66 (partial) | 33454 | 60123 | 1789 |  | 2429 |  |  |  |  |
+| max (65536) | f16 | 0 | 51 | ok | 29/66 (partial) | 21166 | 27867 | 1616 | 19157 | 19344 |  | 29.4 | 20 | 3.9 |
+
+#### `qwen3.6:35b-a3b-mtp`
+
+Run as the tag `qwen3.6:35b-a3b-mtp-q4_K_M`, which is its `model` value in the CSV.
+
+| Context | Cache | FA | Prompt tok | Outcome | GPU layers | Estimate | llama.cpp need | Idle | Loaded | Peak | Peak-idle-est | Load s | Prompt t/s | Gen t/s |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| short (8192) | f16 | 1 | 52 | ok | 42/42 (partial) | 21796 | 21995 | 1605 | 19897 | 19914 |  | 51.7 | 95 | 41.0 |
+| short (8192) | q8_0 | 1 | 52 | ok | 42/42 (partial) | 21721 | 21920 | 1605 | 19861 | 19861 |  | 53.0 | 106 | 42.3 |
+| short (8192) | q4_0 | 1 |  | OOM at load | 42/42 (partial) | 21681 | 21880 | 1605 |  | 19977 |  |  |  |  |
+| short (8192) | f16 | 0 | 52 | ok | 42/42 (partial) | 21796 | 22395 | 1601 | 19569 | 19730 |  | 51.4 | 95 | 42.5 |
+| 5k prompt (8192) | f16 | 1 | 4607 | ok | 42/42 (partial) | 21796 | 21995 | 1605 | 19897 | 19920 |  | 39.2 | 469 | 47.7 |
+| 5k prompt (8192) | q8_0 | 1 | 4608 | ok | 42/42 (partial) | 21721 | 21920 | 1640 | 19827 | 19860 |  | 39.3 | 457 | 20.6 |
+| 5k prompt (8192) | q4_0 | 1 |  | OOM at load | 42/42 (partial) | 21681 | 21880 | 1605 |  | 19977 |  |  |  |  |
+| 5k prompt (8192) | f16 | 0 | 4607 | ok | 42/42 (partial) | 21796 | 22395 | 1601 | 19569 | 19854 |  | 40.2 | 481 | 59.2 |
+| max (262144) | f16 | 1 | 52 | ok | 42/42 (partial) | 26756 | 27891 | 1605 | 19757 | 19930 |  | 33.7 | 55 | 25.4 |
+| max (262144) | q8_0 | 1 | 52 | ok | 42/42 (partial) | 24356 | 25951 | 1605 | 19795 | 19810 |  | 36.2 | 65 | 21.0 |
+| max (262144) | q4_0 | 1 | 52 | ok | 42/42 (partial) | 23076 | 24671 | 1605 | 19733 | 19735 |  | 37.2 | 70 | 38.4 |
+| max (262144) | f16 | 0 |  | OOM at load | 0/42 (partial) | 26756 | 44715 | 1601 |  | 11492 |  |  |  |  |
+| max (65536) | f16 | 0 | 52 | ok | 42/42 (partial) | 22916 | 27435 | 1601 | 19515 | 19702 |  | 40.8 | 54 | 19.5 |
+
+#### `qwen3.5:4b`
+
+| Context | Cache | FA | Prompt tok | Outcome | GPU layers | Estimate | llama.cpp need | Idle | Loaded | Peak | Peak-idle-est | Load s | Prompt t/s | Gen t/s |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| short (8192) | f16 | 1 | 51 | ok | 34/34 | 3539 | 2983 | 1605 | 5785 | 5785 | +641 | 8.6 | 1160 | 119.5 |
+| short (8192) | q8_0 | 1 | 52 | ok | 34/34 | 3419 | 2868 | 1793 | 5667 | 5681 | +469 | 6.1 | 1112 | 115.5 |
+| short (8192) | q4_0 | 1 | 53 | ok | 34/34 | 3355 | 2804 | 1605 | 5603 | 5804 | +844 | 6.4 | 555 | 104.9 |
+| short (8192) | f16 | 0 | 52 | ok | 34/34 | 3539 | 3139 | 1601 | 10353 | 10540 | +5400 | 6.1 | 1136 | 114.3 |
+| 5k prompt (8192) | f16 | 1 | 4608 | ok | 34/34 | 3539 | 2983 | 1605 | 5785 | 5789 | +645 | 2.6 | 2956 | 114.1 |
+| 5k prompt (8192) | q8_0 | 1 | 4608 | ok | 34/34 | 3419 | 2868 | 1605 | 5667 | 5860 | +836 | 2.7 | 5028 | 108.9 |
+| 5k prompt (8192) | q4_0 | 1 | 4607 | ok | 34/34 | 3355 | 2804 | 1605 | 5603 | 5662 | +702 | 2.6 | 5005 | 109.7 |
+| 5k prompt (8192) | f16 | 0 | 4606 | ok | 34/34 | 3539 | 3139 | 1601 | 10353 | 10582 | +5442 | 2.6 | 4330 | 108.7 |
+| max (262144) | f16 | 1 | 52 | ok | 34/34 | 11475 | 12075 | 1605 | 14879 | 15066 | +1986 | 3.3 | 1190 | 115.2 |
+| max (262144) | q8_0 | 1 | 53 | ok | 34/34 | 7635 | 9204 | 1605 | 12005 | 12019 | +2779 | 3.0 | 1158 | 115.3 |
+| max (262144) | q4_0 | 1 | 53 | ok | 34/34 | 5587 | 7156 | 1605 | 10144 | 10144 | +2952 | 2.9 | 1191 | 115.4 |
+| max (262144) | f16 | 0 | 52 | ok | 20/34 (partial) | 11475 | 19507 | 1601 | 19651 | 19838 |  | 5.2 | 63 | 23.9 |
+
+#### `gemma4:e4b`
+
+| Context | Cache | FA | Prompt tok | Outcome | GPU layers | Estimate | llama.cpp need | Idle | Loaded | Peak | Peak-idle-est | Load s | Prompt t/s | Gen t/s |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| short (8192) | f16 | 1 | 50 | ok | 43/43 | 9331 | 3290 | 1605 | 6293 | 6294 | -4642 | 11.6 | 1196 | 109.5 |
+| short (8192) | q8_0 | 1 | 49 | ok | 43/43 | 9252 | 3163 | 1605 | 6157 | 6173 | -4684 | 11.6 | 944 | 103.0 |
+| short (8192) | q4_0 | 1 | 49 | ok | 43/43 | 9210 | 3116 | 1605 | 6111 | 6111 | -4704 | 11.6 | 1306 | 101.6 |
+| short (8192) | f16 | 0 | 50 | ok | 43/43 | 9331 | 3238 | 1789 | 6413 | 6616 | -4504 | 12.1 | 541 | 106.8 |
+| 5k prompt (8192) | f16 | 1 | 4510 | ok | 43/43 | 9331 | 3290 | 1605 | 6279 | 6285 | -4651 | 4.7 | 4454 | 105.8 |
+| 5k prompt (8192) | q8_0 | 1 | 4510 | ok | 43/43 | 9252 | 3163 | 1605 | 6157 | 6163 | -4694 | 4.7 | 4370 | 94.1 |
+| 5k prompt (8192) | q4_0 | 1 | 4510 | ok | 43/43 | 9210 | 3116 | 1605 | 6111 | 6172 | -4643 | 4.7 | 4392 | 93.2 |
+| 5k prompt (8192) | f16 | 0 | 4509 | ok | 43/43 | 9331 | 3238 | 1601 | 6413 | 6451 | -4481 | 4.7 | 3365 | 99.8 |
+| max (131072) | f16 | 1 | 49 | ok | 43/43 | 11251 | 5173 | 1605 | 8163 | 8163 | -4693 | 5.9 | 1136 | 111.5 |
+| max (131072) | q8_0 | 1 | 49 | ok | 43/43 | 10272 | 4656 | 1605 | 7649 | 7649 | -4228 | 6.0 | 1157 | 102.9 |
+| max (131072) | q4_0 | 1 | 49 | ok | 43/43 | 9750 | 4134 | 1605 | 7127 | 7127 | -4228 | 5.8 | 1361 | 102.5 |
+| max (131072) | f16 | 0 | 50 | ok | 43/43 | 11251 | 7318 | 1601 | 10493 | 10509 | -2343 | 5.9 | 498 | 106.9 |
+
+#### `flint:40b-a2b-q4_1`
+
+Larger than the GPU: partial offload (some layers or MoE expert tensors stay on the CPU), so its tokens/s is not a fits-in-VRAM number.
+
+| Context | Cache | FA | Prompt tok | Outcome | GPU layers | Estimate | llama.cpp need | Idle | Loaded | Peak | Peak-idle-est | Load s | Prompt t/s | Gen t/s |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| short (8192) | f16 | 1 | 42 | ok | 50/50 (partial) | 25100 | 24013 | 1605 | 18951 | 19138 |  | 61.8 | 56 | 54.9 |
+| short (8192) | q8_0 | 1 | 41 | ok | 50/50 (partial) | 24954 | 23867 | 1605 | 19004 | 19164 |  | 58.0 | 19 | 34.1 |
+| short (8192) | q4_0 | 1 | 40 | ok | 50/50 (partial) | 24876 | 23789 | 1605 | 18899 | 19086 |  | 56.5 | 20 | 28.4 |
+| short (8192) | f16 | 0 | 42 | ok | 50/50 (partial) | 25100 | 24488 | 1601 | 18987 | 19174 |  | 67.5 | 12 | 13.3 |
+| 5k prompt (8192) | f16 | 1 | 5003 | ok | 50/50 (partial) | 25100 | 24013 | 1605 | 18951 | 19142 |  | 41.9 | 472 | 75.9 |
+| 5k prompt (8192) | q8_0 | 1 | 5004 | ok | 50/50 (partial) | 24954 | 23867 | 1605 | 18977 | 19168 |  | 43.5 | 397 | 63.5 |
+| 5k prompt (8192) | q4_0 | 1 | 5005 | ok | 50/50 (partial) | 24876 | 23789 | 1605 | 19043 | 19246 |  | 45.7 | 408 | 64.0 |
+| 5k prompt (8192) | f16 | 0 | 5004 | ok | 50/50 (partial) | 25100 | 24488 | 1601 | 18987 | 19306 |  | 47.0 | 349 | 55.6 |
+| max (262144) | f16 | 1 | 41 | ok | 50/50 (partial) | 32044 | 31205 | 1605 | 18941 | 19128 |  | 35.4 | 30 | 35.0 |
+| max (262144) | q8_0 | 1 | 40 | ok | 50/50 (partial) | 28643 | 28266 | 1605 | 18951 | 18951 |  | 45.3 | 38 | 39.3 |
+| max (262144) | q4_0 | 1 | 40 | ok | 50/50 (partial) | 26829 | 26452 | 1605 | 19059 | 19232 |  | 39.8 | 40 | 47.7 |
+| max (262144) | f16 | 0 |  | OOM at load | 0/50 (partial) | 32044 | 47800 | 1601 |  | 1976 |  |  |  |  |
+| max (65536) | f16 | 0 | 40 | ok | 50/50 (partial) | 26668 | 29752 | 1601 | 19156 | 19156 |  | 37.4 | 39 | 59.4 |
+
+#### `nemotron-3.5-lightning:latest`
+
+Larger than the GPU: partial offload (some layers or MoE expert tensors stay on the CPU), so its tokens/s is not a fits-in-VRAM number.
+
+| Context | Cache | FA | Prompt tok | Outcome | GPU layers | Estimate | llama.cpp need | Idle | Loaded | Peak | Peak-idle-est | Load s | Prompt t/s | Gen t/s |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| short (8192) | f16 | 1 | 57 | ok | 54/54 (partial) | 24348 | 24366 | 1620 | 18521 | 18708 |  | 53.5 | 19 | 31.4 |
+| short (8192) | q8_0 | 1 | 57 | ok | 54/54 (partial) | 24326 | 24344 | 1605 | 18526 | 18676 |  | 52.7 | 52 | 35.7 |
+| short (8192) | q4_0 | 1 | 57 | ok | 54/54 (partial) | 24314 | 24332 | 1605 | 18674 | 18674 |  | 54.3 | 17 | 37.9 |
+| short (8192) | f16 | 0 | 56 | ok | 54/54 (partial) | 24348 | 25318 | 1616 | 18639 | 18826 |  | 40.4 | 53 | 45.9 |
+| 5k prompt (8192) | f16 | 1 | 4704 | ok | 54/54 (partial) | 24348 | 24366 | 1605 | 18521 | 18722 |  | 44.2 | 290 | 46.8 |
+| 5k prompt (8192) | q8_0 | 1 | 4705 | ok | 54/54 (partial) | 24326 | 24344 | 1605 | 18499 | 18700 |  | 40.6 | 338 | 45.8 |
+| 5k prompt (8192) | q4_0 | 1 | 4703 | ok | 54/54 (partial) | 24314 | 24332 | 1605 | 18487 | 18688 |  | 43.5 | 299 | 30.6 |
+| 5k prompt (8192) | f16 | 0 | 4705 | ok | 54/54 (partial) | 24348 | 25318 | 1601 | 18639 | 19042 |  | 6.4 | 318 | 36.9 |
+| max (1048576) | f16 | 1 | 54 | ok | 54/54 (partial) | 30444 | 33510 | 1605 | 18613 | 18800 |  | 33.2 | 5 | 8.9 |
+| max (1048576) | q8_0 | 1 | 56 | ok | 54/54 (partial) | 27564 | 31588 | 1605 | 18897 | 19058 |  | 39.3 | 24 | 16.9 |
+| max (1048576) | q4_0 | 1 | 55 | ok | 54/54 (partial) | 26028 | 30052 | 1605 | 18841 | 19028 |  | 39.7 | 34 | 27.3 |
+| max (1048576) | f16 | 0 |  | OOM at load | 0/54 (partial) | 30444 | 166542 | 1601 |  | 1895 |  |  |  |  |
+| max (65536) | f16 | 0 | 57 | ok | 54/54 (partial) | 24684 | 33102 | 1601 | 18879 | 19068 |  | 5.3 | 32 | 19.9 |
+
+#### `nemotron-3.5-bolt:latest`
+
+Larger than the GPU: partial offload (some layers or MoE expert tensors stay on the CPU), so its tokens/s is not a fits-in-VRAM number.
+
+The GPU layers value of the completed rows, 6/6, is suspect: 6 layers is not
+plausible for 20.5 GiB of weights, and this model's OOM row says 0/89. The
+parser probably picked up a different `offloaded N/M layers` line, possibly the
+projector's or a probe pass's. The llama-server logs are not in the repository,
+so the value cannot be corrected; it is left as parsed, marked "suspect" here
+and in the CSV's `note` column.
+
+| Context | Cache | FA | Prompt tok | Outcome | GPU layers | Estimate | llama.cpp need | Idle | Loaded | Peak | Peak-idle-est | Load s | Prompt t/s | Gen t/s |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| short (8192) | f16 | 1 | 56 | ok, projector retried on CPU | 6/6 (partial, suspect) | 22880 | 23654 | 1601 | 16915 | 18899 |  | 45.7 | 33 | 18.2 |
+| short (8192) | q8_0 | 1 | 57 | ok, projector retried on CPU | 6/6 (partial, suspect) | 22850 | 23624 | 1605 | 16891 | 18875 |  | 94.8 | 54 | 12.2 |
+| short (8192) | q4_0 | 1 | 56 | ok, projector retried on CPU | 6/6 (partial, suspect) | 22834 | 23608 | 1623 | 16875 | 19046 |  | 92.8 | 22 | 17.9 |
+| short (8192) | f16 | 0 | 56 | ok, projector retried on CPU | 6/6 (partial, suspect) | 22880 | 24043 | 1601 | 17063 | 18909 |  | 92.7 | 51 | 11.7 |
+| 5k prompt (8192) | f16 | 1 | 4704 | ok, projector retried on CPU | 6/6 (partial, suspect) | 22880 | 23654 | 1601 | 16915 | 18899 |  | 16.2 | 313 | 13.1 |
+| 5k prompt (8192) | q8_0 | 1 | 4703 | ok, projector retried on CPU | 6/6 (partial, suspect) | 22850 | 23624 | 1605 | 16891 | 18875 |  | 76.1 | 263 | 27.0 |
+| 5k prompt (8192) | q4_0 | 1 | 4705 | ok, projector retried on CPU | 6/6 (partial, suspect) | 22834 | 23608 | 1605 | 16889 | 18859 |  | 75.7 | 256 | 21.1 |
+| 5k prompt (8192) | f16 | 0 | 4703 | ok, projector retried on CPU | 6/6 (partial, suspect) | 22880 | 24043 | 1601 | 17063 | 18909 |  | 88.3 | 260 | 8.6 |
+| max (262144) | f16 | 1 | 55 | ok, projector retried on CPU | 6/6 (partial, suspect) | 24864 | 25886 | 1601 | 17103 | 18755 |  | 15.6 | 54 | 11.9 |
+| max (262144) | q8_0 | 1 | 56 | ok, projector retried on CPU | 6/6 (partial, suspect) | 23904 | 25066 | 1605 | 17155 | 19100 |  | 75.7 | 26 | 14.8 |
+| max (262144) | q4_0 | 1 | 57 | ok, projector retried on CPU | 6/6 (partial, suspect) | 23392 | 24554 | 1605 | 16933 | 18718 |  | 69.8 | 50 | 11.5 |
+| max (262144) | f16 | 0 |  | OOM at load | 0/89 (partial) | 24864 | 42395 | 1601 |  | 19284 |  |  |  |  |
+| max (65536) | f16 | 0 | 55 | ok, projector retried on CPU | 6/6 (partial, suspect) | 23328 | 28187 | 1601 | 17201 | 18857 |  | 64.3 | 43 | 10.2 |
+
+### Estimate error, summarised
+
+Positive means the estimate is below the measured (or llama.cpp-projected)
+need. MiB.
+
+| Case | Cells | Error | Above 3072 / 3529 |
+|---|---|---|---|
+| Measured, model fits entirely (`qwen3.5:4b`), 8K, flash attention on | 6 | +469 to +844 | 0 / 0 |
+| Same, flash attention off | 2 | +5400, +5442 | 2 / 2 |
+| Same, 262144 context, flash attention on (f16 / q8_0 / q4_0) | 3 | +1986 / +2779 / +2952 | 0 / 0 |
+| Measured, `gemma4:e4b` (estimate counts per-layer embedding tensors that llama.cpp keeps in host memory) | 12 | -4704 to -2343 | 0 / 0 |
+| llama.cpp need minus estimate, 8 other models, 8K, flash attention on | 24 | median +90, p90 +774, max +774 | 0 / 0, also with the undercount added |
+| Same, flash attention off | 8 | median +738, p90 +1163, max +1163 | 0 / 0 |
+| Same, maximum loaded context, flash attention on | 24 | median +1148, p90 +3066, max +4024 | 2 / 2; with the undercount added, 6 / 5-6 |
+| Same, maximum loaded context (65536 or 262144), flash attention off | 8 | median +5780, p90 +8418, max +8418 | 8 / 7 |
+| Undercount: measured minus llama.cpp need, the two models that fit entirely (`qwen3.5:4b`, `gemma4:e4b`), flash attention on | 18 | +1020 to +1451, median +1388 |  |
+| Same, flash attention off | 5 | +1589 to +1612 (`gemma4:e4b`), +5800 and +5842 (`qwen3.5:4b`) |  |
+
+p90 is nearest-rank: the ⌈0.9 n⌉-th smallest value (the 22nd of 24, the 8th
+of 8). Medians are the usual ones (the mean of the two middle values when n is
+even).
+
+**llama.cpp's projection undercounts.** On the two models whose weights all
+went to the GPU, real use (Peak minus Idle) was above llama.cpp's projected
+need in every row: by 1020-1451 MiB with flash attention on, and by 1589-1612
+(`gemma4:e4b`) or 5800-5842 MiB (`qwen3.5:4b`) with it off. The "with the
+undercount added" counts add it to every cell of those rows, that is, they
+assume the other models have the same undercount. Any value from 1020 to 1451
+gives the same 6 cells above 3072. Against 3529, it is 5 cells at 1020 and 6
+for any value above 1132. That is an extrapolation from two small models, and
+both load their vision projector from the model file itself, which "llama.cpp
+need" does not add (it adds only a separate projector file). So part of the
+gap may be projector memory, and how much of it carries over to the other
+models is not known. Without flash attention the undercount depends on the
+model, so it is not added to those rows; with even the smaller figure, all 8
+maximum-context cells are above 3529.
+
+**The reserve is more than 3 GiB.** In the last column, 3072 is `fillMargin`
+alone. What the head GPU keeps back in a split is more: `localAvailable`
+(`cluster/placement.go`) first takes `MinimumMemory()` (457 MiB on CUDA,
+`ml/device.go`) and `OLLAMA_GPU_OVERHEAD` off the GPU's free memory, and
+`fillSplit` then takes `fillMargin` off what is left. With
+`OLLAMA_GPU_OVERHEAD` at its default of 0, that is 3072 + 457 = 3529 MiB on
+this card. `fillMargin` is used only in `fillSplit`, which runs only when the
+model does not fit the local GPU by estimate and at least one usable peer is
+selected. None of these runs had a peer, so none of them used it; the last
+column compares with what it would have kept back.
+
+**What the buffer lines leave out.** Beyond llama.cpp's own buffer lines
+(`CUDA0 model/KV/compute/RS buffer size`, plus a separate projector when it is
+on the GPU), the measured peak was 797-1248 MiB higher (median +1185, p90 +1212) on
+the 23 completed rows where every weight was on the GPU. This includes the
+CUDA context, cuBLAS workspaces and the inline projector of `qwen3.5:4b` and
+`gemma4:e4b`. The figure cannot be taken from the partial-offload rows. In 29
+of those 83 rows the parsed buffer lines add up to more than the measured peak
+above idle (`unplanned_mib` negative, down to -8053). In 7 of them the buffer
+lines alone exceed what the card had free; for `nemotron-3.5-lightning` at
+65536 with flash attention off, that is 25520 MiB against 18869. They cannot be
+the final allocation. They are probably sizes llama.cpp printed during its fit
+probes; the server's own parser in `llm/llama_server.go` replaces such repeated
+values with the final load's. The logs that would settle it are not in the
+repository. The values are left as parsed. The CSV's `buffers_reliable` column
+is `False` for those 29 rows (`qwen3.6` 10, `qwen3.8:27b` 6,
+`nemotron-3.5-lightning` 12, `nemotron-3.5-bolt` 1), `True` for the 23
+full-offload rows, and `unverified` for the other partial-offload rows and the
+failed runs. During the 5k-token request the GPU rose a further 201 MiB at
+the median, 785 at most, over the "Loaded" reading (35 rows).
+
+### Findings
+
+- **Outcomes.** 119 runs (108 cells plus 11 failed maximum-context attempts):
+  106 ok, 6 OOM at load, 1 OOM during the prompt, 6 stopped by the host-RAM
+  guard. The 6 load OOMs: `qwen3.6:35b-a3b-mtp` with `q4_0` at 8K (both
+  prompt sizes, and again on an isolated rerun of both: deterministic; the
+  reruns are not in the CSV) and the maximum-context attempt with flash
+  attention off for `qwen3.6`, `flint`,
+  `nemotron-3.5-lightning` and `nemotron-3.5-bolt`. The `qwen3.6` one: the fit
+  projected 21019 MiB against 17907 MiB free, kept 42/42 layers with part of
+  the expert tensors in host memory, and died allocating a cuBLAS workspace
+  with the card at 19977 of 20470 MiB. The same model loaded with f16 and q8_0
+  at 19914 and 19861 MiB, so it sits within about 0.5 GiB of the limit in all
+  three; what tipped q4_0 over was not determined. The OOM during the prompt:
+  `gemma4:31b-it-qat`, 262144 context, `q4_0`, flash attention on. It loaded
+  with 19933 MiB used (537 MiB free) and failed on the first 54-token request.
+- **#72's load-time pressure shows up as a projector OOM at load (retried on
+  the CPU); the 5k-prompt OOM did not reproduce.** `gemma4:31b-it-qat` at 8K
+  with a 5k prompt completed in all four cache settings (peaks 18833-19978
+  MiB). What failed instead was a different step: in 9 of its 15 runs the
+  first llama-server start died with a CUDA out-of-memory error while loading
+  the projector, and the server restarted it with the projector on the CPU.
+  Loads with the retry took 25-100 s (six of the nine 70-100 s), against
+  29-56 s without it. `nemotron-3.5-bolt` did the same in all 13 runs, and
+  `qwen3.6` in one. These runs were on the installed `0.40.11-cluster.1`,
+  older than this branch's base, so the fallback behaviour is that build's.
+  Where the projector stayed on the GPU (`q8_0`, 8K) the card ended with 492-506 MiB
+  free and the 5k prompt added 14 MiB over the short one. So the failure
+  needs the load to end within about half a GiB of the capacity, and the
+  estimate does not see that: for this model it is within 165 MiB of
+  llama.cpp's own full-offload need at 8K with flash attention on, and
+  llama.cpp then fills the card to within about 0.5 GiB of full anyway.
+- **At 8K with flash attention on, the estimate is close and 3 GiB is
+  enough, with less to spare than llama.cpp's projection suggests.** The gap
+  to llama.cpp's need is under 0.8 GiB (at most 774 MiB) for all eight models
+  that are not `gemma4:e4b`, and of those the one that fits entirely
+  (`qwen3.5:4b`) peaked 0.46-0.82 GiB above its estimate. Adding the largest
+  undercount measured with flash attention on (1451 MiB, see above) to the
+  worst cell leaves about 0.8 GiB (847 MiB) of the 3 GiB, and 1.3 GiB of the
+  3529 MiB the head actually keeps back. Where every weight is on the GPU,
+  that undercount is mostly what llama.cpp's buffer lines leave out (1.2 GiB
+  at the median, peak included), and a 5k prompt adds 0.2 GiB at the median
+  over the Loaded reading. The estimate is too high, not too low, for
+  `gemma4:e4b` (-4.5 GiB, see table).
+- **3 GiB is too little when the context is large or flash attention is
+  off.** Compute buffers grow with context and are larger without flash
+  attention: median 392 MiB with it and 633 MiB without at 8K (max 4949,
+  `qwen3.5:4b`), and 920 vs 4520 MiB at the largest loaded context. These
+  medians are per cell and leave out the 29 rows whose buffer lines are
+  impossible (see above); the partial-offload values that remain are
+  unverified. On llama.cpp's need alone, the gap was above 3 GiB in 8 of 8
+  flash-attention-off cells at the maximum loaded context (65536 or 262144;
+  7 of 8 above the 3529 MiB the head actually keeps back), and in 2 of 24
+  with it on (`nemotron-3.5-lightning` at 1M context). With the measured
+  undercount of llama.cpp's projection added, 6 of those 24 are above 3 GiB
+  (5 or 6 above 3529 MiB): `nemotron-3.5-lightning` at 1M with all three
+  cache types, `qwen3.8:27b` at 262144 with `q8_0` and `q4_0`, and
+  `gemma4:31b-it-qat` at 262144 with `q8_0`. `qwen3.5:4b` alone peaked
+  +5.3 GiB above its estimate with flash attention off at 8K (a 4949 MiB,
+  4.83 GiB, compute buffer instead of 387 MiB, 0.38 GiB), and +1.9 to
+  +2.9 GiB at 262144 context with it on. Quantized KV makes this worse at
+  long context: its compute buffer was 2512 MiB against 1543 for f16 at
+  262144 (`qwen3.5:4b`). A
+  margin that scales with context, and a bigger one when flash attention is
+  disabled, would fit this data better than a flat 3 GiB.
+- **What q8_0 and q4_0 save, in real memory.** Where the model fits, the card
+  shows the whole saving: `qwen3.5:4b` at 262144 context, KV buffer 8192 /
+  4352 / 2304 MiB (f16 / q8_0 / q4_0), peak above idle 13461 / 10414 / 8539
+  MiB (-3047 and -4922); `gemma4:e4b` at 131072, KV 2088 / 1109 / 587 MiB,
+  peak above idle 6558 / 6044 / 5522 (-514 and -1036). Where the model does
+  not fit, the card stays nearly full regardless (Peak 18.2-19.5 GiB, Loaded
+  16.5-19.5 GiB, of 19.99 GiB) because llama.cpp spends the saving on more
+  GPU layers: `granite4.2:30b` at 8K
+  59 / 62 / 63 of 65 layers, 14.0 / 17.5 / 18.0 tok/s; `qwen3.8:27b`
+  63 / 64 / 65 of 66, 24.5 / 25.6 / 29.9 tok/s (one short-prompt sample each).
+- **Flash attention off costs memory and reach as well as speed.** At 8K
+  with f16, `gemma4:31b-it-qat` got 47 instead of 50 GPU layers and 5k-prompt
+  speed fell from 415 to 263 tok/s; `qwen3.8:27b` 61 instead of 63 layers
+  and prompt processing of 53 instead of 144 tok/s on the short prompt. With
+  flash attention off none of the seven models that overflow the card loaded
+  its maximum context (four CUDA OOMs at load, three stopped by the host-RAM
+  guard); 65536, the next size tried, ran for all seven. With it on, four of
+  those seven loaded their maximum at all three cache types.
+- **Maximum contexts that ran** (flash attention on, every cache type
+  unless noted): 262144 for `qwen3.6`, `flint`, `bolt` and `qwen3.5:4b`,
+  1048576 for `lightning`, 131072 for `gemma4:e4b`. `granite4.2:30b` and
+  `qwen3.8:27b` ran their maximum (131072, 262144) with `q8_0` and `q4_0`;
+  `gemma4:31b-it-qat` with `q8_0` only (its `q4_0` maximum OOMed, see above,
+  and 65536 ran). With f16 the maximum attempt of these three was stopped by
+  the host-RAM guard and 65536 ran.
+
+### What could not be measured
+
+- No peers: nothing here says how the margin behaves with a computed split.
+  Only the two small models fit entirely, so the measured estimate error for
+  20 GB-class models comes from llama.cpp's own projection, not from a
+  measurement.
+- One sample per cell (the `qwen3.6` `q4_0` OOM was repeated; the repeats are
+  not in the CSV). Tokens per
+  second come from a single request, 50 tokens of prompt for the short rows,
+  and are noisy (`flint` short-prompt generation: 55, 34, 28 tok/s across the
+  three flash-attention-on cache types, which I do not attribute to the
+  cache).
+- The installed build is `0.40.11-cluster.1`, older than the base of this
+  branch; llama.cpp's fit and the projector fallback are from that build.
+  Its tag, `v0.40.11-cluster.1`, has llama.cpp b11845 in `LLAMA_CPP_VERSION`
+  (this branch's base has b11963). Upstream's b12111 (Ollama v0.40.15-rc1)
+  adds `layer input` and `rotation` buffers, so re-measure after that sync
+  before setting `fillMargin` from this data.
+- "Maximum context" for `gemma4:31b-it-qat`, `granite4.2:30b` and
+  `qwen3.8:27b` with f16 (flash attention on or off) was not reached because
+  the harness stopped the run at under 1.5 GiB of free host RAM, so whether
+  they would have run, slowly, is unknown. A 200 ms poll can miss a short
+  allocation spike. No image requests were sent, so the projector's
+  per-request memory was not exercised. One request at a time
+  (`OLLAMA_NUM_PARALLEL` 1).
+- `nemotron-3.5-bolt` appeared on the machine after the first f16 pass; its
+  f16 flash-attention-on cells were run separately at the end with the same
+  harness.
+
+### CSV columns
+
+One row per run of [`cluster-benchmarks-vram.csv`](./cluster-benchmarks-vram.csv), in the order of the tables above. All memory values are MiB.
+
+| Column | Meaning |
+|---|---|
+| `model` | The tag as run (`qwen3.6:35b-a3b-mtp-q4_K_M`, `nemotron-3.5-*:latest`) |
+| `ctx_label`, `num_ctx` | `8K-short`, `8K-5k-prompt`, `max` (the largest context that ran: the model's maximum or the 65536 fallback) or `max-attempt-failed` (a maximum that did not run); the context |
+| `kv`, `fa` | `OLLAMA_KV_CACHE_TYPE`; flash attention, 1 on and 0 off |
+| `prompt_tokens`, `gen_tokens`, `prompt_tps`, `gen_tps`, `load_s` | From the measured request's response, and the load time |
+| `outcome`, `error`, `note` | `ok`, `OOM at load`, `OOM during prompt` or `aborted by host-memory guard` ("stopped: host RAM" in the tables); the HTTP error; free-text remarks |
+| `gpu_layers`, `total_layers`, `partial` | llama.cpp's `offloaded N/M layers to GPU`; `partial` is True when some weights (layers or MoE expert tensors) stayed on the CPU. Suspect for `nemotron-3.5-bolt`, see its table |
+| `est_mib` | Estimate |
+| `fit_full_mib`, `proj_total_mib`, `need_minus_est_mib` | llama.cpp's projection for full offload; that plus a separate projector file ("llama.cpp need"); that minus `est_mib` |
+| `cuda_model`, `cuda_kv`, `cuda_compute`, `cuda_rs`, `alloc_mib` | The `CUDA0 model/KV/compute/RS buffer size` lines and their sum. 0 means the line was not logged: the model has no such buffer, or a failed run ended first |
+| `buffers_reliable` | `True`: completed with every weight on the GPU, buffer lines consistent with the measured peak. `False`: the buffer lines, plus a separate projector on the GPU, exceed the measured peak above idle, so they are not the final allocation. `unverified`: the other partial-offload rows and the failed runs |
+| `proj_cpu`, `starts` | True when the projector was retried on the CPU; llama-server starts (2 with that retry) |
+| `mmproj_mib` | Projector memory parsed from the log; the source line was not recorded. Filled in for every model with a vision projector, separate or inline in the model file (`qwen3.5:4b`, `gemma4:e4b`), and empty for the others. With flash attention off it is 5392-5571 MiB for the three qwen models, more than could have been on the GPU in the `qwen3.5:4b` rows (Peak above idle leaves 1170-1212 MiB beyond the buffer lines), so do not read it as memory in use |
+| `gpu_base_mib`, `gpu_after_load_mib`, `gpu_peak_load_mib`, `gpu_peak_req_mib`, `gpu_peak_mib` | Idle; Loaded; the polled maximum during the load and during the request; Peak, the largest of the last three |
+| `peak_above_idle_mib`, `err_mib` | Peak minus Idle; that minus `est_mib` (Peak-idle-est), for full offload only |
+| `unplanned_mib` | `peak_above_idle_mib` minus `alloc_mib` minus a separate projector file on the GPU ("beyond llama.cpp's buffers"); only meaningful where `buffers_reliable` is True |
+| `req_growth_mib` | `gpu_peak_req_mib` minus `gpu_after_load_mib` |
+| `host_min_avail_mib` | The lowest free host RAM the harness recorded during the run. In one "stopped: host RAM" row (`gemma4:31b-it-qat`, 262144, f16, flash attention off) it is 5731, above the 1.5 GiB threshold, so the recorded minimum does not show what triggered the guard there |
+
+In the 13 failed runs (`outcome` other than `ok`), columns for steps the run
+did not reach are empty, the buffer columns hold what the failed start
+logged, and the derived `err_mib`, `unplanned_mib` and `req_growth_mib` are
+empty: they are filled in for completed runs only. A `gpu_layers` of 0 in a
+failed run may mean that no `offloaded` line was logged.
 
 ## Open questions
 

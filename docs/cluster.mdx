@@ -291,6 +291,108 @@ While it's down, the machine advertises itself as not sharing.
 A non-zero `CPU` share in `ollama ps` (see above) while cluster mode is on
 is the direct, visible confirmation this happened — not a bug.
 
+### Leaving a small shortfall on the CPU
+
+By default a model that misses the local GPU spills onto peers however small
+the shortfall. `OLLAMA_CLUSTER_MIN_SPILL` (off unless set) keeps it local
+instead when the shortfall, the predicted size minus the local GPUs' free
+memory, is at most that fraction of the model: llama-server then puts those
+few layers on the CPU. The server logs `cluster: shortfall is under
+OLLAMA_CLUSTER_MIN_SPILL` with `predicted`, `local`, `shortfall` and
+`cpu_share`. A request that sets `rpc_servers`, `rpc_auto: true` or its own
+`rpc_placement` is placed as before; the threshold only changes the server's
+default.
+
+It exists because of these runs on the 20 GB RTX A4500 head
+([#73](https://github.com/borism/ollama-cluster/issues/73)):
+
+| Model (layers on CPU locally) | Local only: gen / prompt tok/s | Cluster: gen / prompt tok/s |
+|---|---|---|
+| granite4.2:30b (2 of 65) | 20.3 / 705 | 20.5 / 398 |
+| qwen3.8:27b (2 of 66) | 27.5-32.2 / 728 | 33.7 / 380 |
+| gemma4:31b-it-qat (3 of 61) | 14.4, then out of memory (#72) | 16.8 / 359 |
+| qwen3.6:35b-a3b (MoE) | 59.7 / 606 | 73.7 / 863 |
+
+Prompt processing sends activations over the network at every device
+boundary, and the peers were slower at it, so for the dense models a few
+layers on the CPU cost less than the hop: local-only processed prompts about
+twice as fast. Generation went the other way: local-only was 14-19% slower
+on gemma4, the MoE model and one qwen3.8 run, and only granite4.2 was even. So this trades generation speed for prompt speed;
+turn it on if your requests are long prompts with short answers. The cluster
+wins clearly once a tenth or more of the model would be on the CPU.
+
+It is off, and there is no recommended value, because four models are not
+enough to pick a number: the MoE model was faster on the cluster, gemma4 ran
+out of memory locally, none of it was measured on a faster link, and the
+shortfall leaves out compute buffers, so a real local load puts somewhat more
+on the CPU than `cpu_share` says. The runs above only cover shortfalls of
+about 0.03-0.05.
+
+## Model formats and backends
+
+Not every GPU backend can compute every quantization format. On one machine
+that costs nothing: llama.cpp asks the backend, and layers it can't run go to
+the CPU. Over RPC it can't ask: at the bundled llama.cpp (b12257) the RPC
+protocol has no command for it and a remote device claims to support
+everything (`ggml_backend_rpc_device_supports_op` in `ggml-rpc.cpp`). The
+head would place the layers on the peer anyway, and the peer's
+`ggml-rpc-server` would abort at warm-up with `unsupported op 'MUL_MAT'`.
+
+So the head checks the model's tensor types against the backend each peer
+reports for its devices (`backend` in the beacon: `CUDA`, `ROCm`, `Metal`,
+`Vulkan`) before placing layers, using the table below, and leaves out the
+peers that can't run them, with a `cluster: not placing layers on a peer that
+cannot run this model's format` line in the server log naming the format, the
+peer and the reason. A peer that doesn't report a backend is used as before.
+Peers set by hand with `rpc_servers` aren't checked.
+
+| Format | Backend | Status |
+| --- | --- | --- |
+| NVFP4 | Metal | Peer left out. **Verified**: crashed a split at warm-up on llama.cpp b11845 ([#54](https://github.com/borism/ollama-cluster/issues/54)); b12257 still refuses it |
+| NVFP4 | CUDA | Runs. **Verified** on the head's own GPU, not yet on a CUDA peer |
+| NVFP4 | ROCm, Vulkan | Runs (source only) |
+| TQ1_0 | Metal, CUDA, ROCm | Peer left out (source only) |
+| F8_E4M3 | Metal | Peer left out (source only; new in b12257) |
+| TQ2_0 | CUDA, ROCm | Peer left out (source only) |
+| TQ1_0, TQ2_0 | Vulkan | Runs (source only) |
+| TQ2_0 | Metal | Runs (source only) |
+| MXFP4, IQ1_S to IQ4_XS | Metal, CUDA, ROCm, Vulkan | Runs (source only) |
+| Q4_1 | Metal | Runs. **Verified**: `flint:40b-a2b-q4_1` split between an NVIDIA head and an M2 Max peer |
+| K-quants (Q4_K) | Metal | Runs. **Verified**: `unsloth/flint-GGUF` `UD-Q4_K_XL` split between an NVIDIA head and an M2 Max peer |
+| BF16 | Metal | Depends on the GPU: refused where Metal has no bfloat support. Not checked before placing (source only) |
+
+"Source only" means read from the backend's `supports_op` at llama.cpp
+b12257 (`ggml-metal-device.m`, `ggml-cuda.cu`, which ROCm builds too, and
+`ggml-vulkan.cpp`), not run on that hardware. Formats not listed, such as
+Q4_0, Q8_0, F16 and the other K-quants, run on all four. The table lives in
+`cluster/capability.go`; a test fails when the bundled llama.cpp changes so it
+gets checked again.
+
+If a peer still aborts during a load (a format the table doesn't know about
+yet, or the worker died for another reason), the head's `llama-server` exits
+with `Remote RPC server crashed or returned malformed response`. The server
+then retries the load once without that peer, and logs `cluster: peer crashed
+during load, retrying without it`. llama.cpp doesn't say which peer crashed,
+so when several were in use all of them are left out of the retry. The reason
+itself (`unsupported op ...`) is only in the peer's own server log. When there
+is no retry (the request set `rpc_servers`, or the one retry was used), the
+error names the model's format, the peer, its backend and, where the table
+knows it, the reason.
+
+### NVFP4 models with a Mac in the cluster
+
+`flint:40b` (also tagged `latest`, `40b-a2b` and `40b-a2b-gguf-nvfp4`) is
+NVFP4, which Apple GPUs can't run. With a Mac as the only peer, its layers
+stay on the head's GPU and CPU. To use the Mac's GPU as well, pull the Q4_1
+build instead:
+
+```shell
+ollama pull flint:40b-a2b-q4_1
+```
+
+On an NVIDIA head with an M2 Max peer it loaded 41% on the head GPU, 59% on
+the Mac and 0% on CPU, and generated 51.7 tok/s.
+
 ## RDMA over Thunderbolt (macOS)
 
 Peers talk over TCP by default. Two Apple silicon Macs connected directly by a
@@ -306,10 +408,11 @@ so RDMA and non-RDMA machines mix freely in one cluster. Set
 
 ## Environment variables
 
-Each of these (except `OLLAMA_CLUSTER_PORT`) can also be set with `ollama
-cluster on/off/set`, which saves it in the server's `~/.ollama/server.json`
-under the key in parentheses. An environment variable that is set always
-wins over the saved value; `ollama cluster status` shows which one applies.
+Each of these (except `OLLAMA_CLUSTER_PORT` and `OLLAMA_CLUSTER_MIN_SPILL`)
+can also be set with `ollama cluster on/off/set`, which saves it in the
+server's `~/.ollama/server.json` under the key in parentheses. An environment
+variable that is set always wins over the saved value; `ollama cluster status`
+shows which one applies.
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -319,6 +422,7 @@ wins over the saved value; `ollama cluster status` shows which one applies.
 | `OLLAMA_CLUSTER_SHARE_DEVICES` (`cluster_share_devices`) | all | Comma-separated ggml device names (`CUDA1`, `Vulkan0`) to share instead of every accelerator, passed to the worker as `-d` and the only devices peers see. |
 | `OLLAMA_CLUSTER_SEEDS` (`cluster_seeds`) | none | Comma-separated `host:port` list of peers to unicast directly to, for reaching machines outside this host's broadcast domain (a different subnet or VLAN — broadcast discovery doesn't cross those). Not needed on a flat LAN. |
 | `OLLAMA_CLUSTER_PLACEMENT` (`cluster_placement`) | `waterfill` | How candidate peers are chosen when more than one has spare capacity: `waterfill` weighs peers by measured load and latency and considers every usable one; `greedy` instead just ranks by free memory and adds peers until the shortfall's covered. With one local GPU, the model is then laid out local-first (see "Which peers get weights" below), so a candidate that isn't needed gets nothing and is dropped. |
+| `OLLAMA_CLUSTER_MIN_SPILL` | `0` (off) | Largest share of a model, from 0 to 1 (such as `0.05`), to leave on the CPU instead of spilling it onto peers; see "Leaving a small shortfall on the CPU" above. `0` always spills. Experimental: the right value isn't measured yet. |
 | `OLLAMA_CLUSTER_CACHE_GB` (`cluster_cache_gb`) | unset (no cap) | Cap on the tensor cache a sharing machine keeps in `~/.ollama/models/rpc/`: weights peers loaded onto it, so loading the same model again skips the network. Unset, the cache grows until the disk is down to its free-space floor, 5% of the volume, but never under 10 GiB or over 15 GiB; set, it is also held to that many GB. Either way the oldest files go first, checked every minute, and files that don't match their hash (a write cut short) are deleted. If the free space can't be read, an unset cap is treated as 32 GB for that check. A big download (`ollama pull`) that outruns the check can still use up the floor. `0` turns the cache off. |
 
 ## Per-request overrides
@@ -385,12 +489,22 @@ per-model breakdown and caveats.
 ## Current limitations
 
 - Hub-and-spoke only (see above) — no multi-hop mesh across peers.
+- The head can't ask a peer which model formats it can run, so it uses a
+  fixed table instead (see [Model formats and
+  backends](#model-formats-and-backends)). NVFP4 models don't use Mac
+  peers.
 - Placement weighs each peer's self-reported load and a measured
   round-trip latency, not a real measured tokens/sec benchmark per device
   yet.
 - Cross-subnet discovery via `OLLAMA_CLUSTER_SEEDS` is implemented and
   unit-tested but has limited real-world mileage so far — same-subnet
   broadcast discovery is the well-exercised path.
+- IPv4 only. llama.cpp's RPC transport can't bind or connect over IPv6
+  yet, so discovery beacons, peer addresses and the RPC link all use IPv4,
+  and a machine needs an IPv4 address on the LAN to take part. A seed
+  written as `[2001:db8::10]:11435`, or a hostname with only IPv6 (AAAA)
+  records, is skipped with a warning in the server log. Ollama's own API
+  (`OLLAMA_HOST`) is not affected.
 - In the benchmark runs, `qwen3.8:27b` placed 0 of 66 layers on any GPU
   or peer, and why is not established. It offloads normally on a single
   machine, so it is not a limit of its hybrid SSM/attention architecture
