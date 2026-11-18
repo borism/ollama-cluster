@@ -315,14 +315,18 @@ It exists because of these runs on the 20 GB RTX A4500 head
 
 Prompt processing sends activations over the network at every device
 boundary, and the peers were slower at it, so for the dense models a few
-layers on the CPU cost less than the hop. The cluster wins clearly once a
-tenth or more of the model would be on the CPU.
+layers on the CPU cost less than the hop: local-only processed prompts about
+twice as fast. Generation went the other way: local-only was 14-19% slower
+on gemma4, the MoE model and one qwen3.8 run, and only granite4.2 was even. So this trades generation speed for prompt speed;
+turn it on if your requests are long prompts with short answers. The cluster
+wins clearly once a tenth or more of the model would be on the CPU.
 
-It is off because four models are not enough to pick a number: the MoE model
-was faster on the cluster, gemma4 ran out of memory locally, none of it was
-measured on a faster link, and the shortfall leaves out compute buffers, so a
-real local load puts somewhat more on the CPU than `cpu_share` says. The runs
-above suggest about `0.05`.
+It is off, and there is no recommended value, because four models are not
+enough to pick a number: the MoE model was faster on the cluster, gemma4 ran
+out of memory locally, none of it was measured on a faster link, and the
+shortfall leaves out compute buffers, so a real local load puts somewhat more
+on the CPU than `cpu_share` says. The runs above only cover shortfalls of
+about 0.03-0.05.
 
 ## RDMA over Thunderbolt (macOS)
 
