@@ -85,7 +85,9 @@ func StartRPCWorker(port int, cacheDir string, devices []string) (*RPCWorker, er
 
 	// ponytail: binds every interface (0.0.0.0) unconditionally so LAN peers
 	// can actually reach it -- there's no caller yet that needs a narrower
-	// bind. Add a host param if one shows up.
+	// bind. Add a host param if one shows up. Not "::": the pinned
+	// rpc-server's socket_t::create_server (ggml/src/ggml-rpc/transport.cpp)
+	// takes only what inet_addr parses, so it can't bind IPv6 yet (#34).
 	host := "0.0.0.0"
 	args := []string{"-H", host, "-p", strconv.Itoa(port)}
 	args = append(args, rpcDeviceArgs(devices)...)
