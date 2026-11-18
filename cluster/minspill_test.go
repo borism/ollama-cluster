@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/borism/ollama-cluster/api"
@@ -17,14 +18,35 @@ var (
 	minSpillPeers = []Peer{peerAt("10.0.0.2", 25600, 0, 0)}
 )
 
-// captureLog sends slog output to a buffer for the rest of the test.
-func captureLogAt(t *testing.T, level slog.Level) *bytes.Buffer {
+// lockedBuffer is a log sink the test can read while goroutines left over
+// from other tests (discovery loops that log at debug level) still write to
+// the global logger. A bare bytes.Buffer made TestMinSpillOffByDefault fail
+// under -race in about 1 run in 8.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// captureLogAt sends slog output to a buffer for the rest of the test.
+func captureLogAt(t *testing.T, level slog.Level) *lockedBuffer {
 	t.Helper()
-	var buf bytes.Buffer
+	buf := &lockedBuffer{}
 	old := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: level})))
+	slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: level})))
 	t.Cleanup(func() { slog.SetDefault(old) })
-	return &buf
+	return buf
 }
 
 func TestMinSpillOffByDefault(t *testing.T) {

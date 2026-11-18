@@ -240,6 +240,35 @@ func TestSelectRPCServersSkipsIPv6LinkLocal(t *testing.T) {
 	}
 }
 
+// TestSelectRPCServersIPv6Only: with every peer at a global or unique-local
+// IPv6 address, none goes into --rpc while llama.cpp RPC is IPv4-only, so the
+// load stays local and the placement log says why (#34). The model needs more
+// than the local GPU has, so IPv4 peers here would have been used.
+func TestSelectRPCServersIPv6Only(t *testing.T) {
+	var buf bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(old) })
+
+	peers := []Peer{
+		peer("2001:db8::2", 50052, RPCProtoMajor, 0, 50000),
+		peer("fd12::7", 50052, RPCProtoMajor, 0, 50000),
+	}
+	got := SelectRPCServers([]ml.DeviceInfo{gpu(100)}, mib(10000), peers, api.Options{})
+	if rpcIPv6 {
+		if got.RPCServers != "[2001:db8::2]:50052,[fd12::7]:50052" && got.RPCServers != "[fd12::7]:50052,[2001:db8::2]:50052" {
+			t.Errorf("RPCServers = %q, want both IPv6 peers, bracketed", got.RPCServers)
+		}
+		return
+	}
+	if got.RPCServers != "" {
+		t.Errorf("RPCServers = %q, want empty with only IPv6 peers", got.RPCServers)
+	}
+	if !strings.Contains(buf.String(), "IPv6 address, which llama.cpp RPC can't reach yet") {
+		t.Errorf("placement log doesn't say why the IPv6 peers were left out:\n%s", buf.String())
+	}
+}
+
 // TestSelectRPCServersPrefersLowLoad: two peers with equal free memory but
 // different self-reported load. The idle one should be used to its full
 // capacity and listed first; the busy one only covers the remainder.

@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/netip"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -438,6 +440,61 @@ func TestProbePeerSkipsIPv6Candidates(t *testing.T) {
 		if _, dialed := tbl.backoff["p1|"+ip]; dialed {
 			t.Errorf("%s was dialed (it has a backoff entry), want it skipped", ip)
 		}
+	}
+}
+
+// TestProbePeerIPv6Only: a peer that offers nothing but IPv6 addresses (a
+// link-local one with a zone, a link-local one without, a global one) is
+// never dialed and keeps its last-known address, instead of an IPv6 winner
+// becoming the --rpc host. No IPv6 interface is needed: nothing is dialed.
+func TestProbePeerIPv6Only(t *testing.T) {
+	p := Peer{ID: "p6", Addr: "10.0.0.9", Addrs: []string{"fe80::1%eth0", "fe80::2", "2001:db8::1", "fd12::7"}, RPCPort: 50052, LastSeen: time.Now()}
+	tbl := &Table{peers: map[string]Peer{"p6": p}}
+	probePeer(tbl, p)
+
+	if got := tbl.peers["p6"].Addr; got != "10.0.0.9" {
+		t.Errorf("Addr = %q, want the last-known address kept", got)
+	}
+	if len(tbl.backoff) != 0 {
+		t.Errorf("an IPv6 candidate was dialed (backoff entries: %v), want none", tbl.backoff)
+	}
+}
+
+// TestBroadcastLoopIPv6OnlySeed: with an IPv6 seed as the only seed, the
+// udp4 beacon socket can't send to it, so the loop skips it and warns once,
+// not on every tick.
+func TestBroadcastLoopIPv6OnlySeed(t *testing.T) {
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Skipf("no loopback UDP available in this sandbox: %v", err)
+	}
+	defer conn.Close()
+
+	logs := &lockedBuffer{}
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(old) })
+
+	cfg := Config{
+		Port:        11435,
+		Interval:    5 * time.Millisecond,
+		Seeds:       []string{"[2001:db8::10]:11435"},
+		SelfDevices: func() []ml.DeviceInfo { return nil },
+		SelfRPCPort: func() int { return 0 },
+		SelfLoad:    func() float64 { return 0 },
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		broadcastLoop(ctx, conn, cfg, &Table{})
+		close(done)
+	}()
+	time.Sleep(100 * time.Millisecond) // about 20 ticks
+	cancel()
+	<-done
+
+	if n := strings.Count(logs.String(), "skipping IPv6 seed"); n != 1 {
+		t.Errorf("logged the IPv6 seed skip %d times, want once:\n%s", n, logs.String())
 	}
 }
 
