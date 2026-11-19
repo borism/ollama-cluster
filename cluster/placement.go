@@ -300,31 +300,46 @@ func peersAt(usable []Peer, addrs []string) []Peer {
 // attention on (growing with context) and up to 6.1 GiB with it off; see
 // docs/cluster-benchmarks.mdx#vram-estimate-vs-measured-use-november-2026.
 //
-// The 3 GiB is for contexts up to fillMarginCtx; beyond that the compute
-// buffers keep growing, so fillMarginFor adds fillMarginPerCtx per token. The
-// same data had the need exceed the projection by up to 4 GiB at 65536 and
-// 262144 tokens with flash attention on, and 8.4 GiB with it off.
+// 3 GiB is the margin for every device but the one case below. Compute buffers
+// keep growing with num_ctx: the same data had the need exceed llama.cpp's
+// projection by up to 4 GiB at 65536 and 262144 tokens with flash attention
+// on, and 8.4 GiB with it off. So fillMarginFor adds fillMarginPerCtx per
+// token above fillMarginCtx, on top of the 3 GiB.
 //
-// ponytail: both constants are tunable, not measured. Nothing here lowers the
-// margin below 3 GiB, since no memory was measured with a peer attached;
-// lowering it for a small context, or sizing it from flash attention and the
-// cache type, needs a measured run on the build that carries llama.cpp's
-// newer layer-input and rotation buffers.
+// The one case that gets less is the local discrete CUDA card at num_ctx up to
+// fillMarginCtx: #101 ran a 64.8B Q4_K_M at 4096 tokens with 16.0 GiB of the
+// 17.4 GiB available on the card (1.4 GiB left) and it loaded and ran, and
+// each step toward the peer was slower, so fillMarginCUDA keeps 2 GiB. A peer
+// (its own library and memory are not known here) and a long context keep 3
+// GiB or more.
+//
+// ponytail: the sizes here are tunable. 1.4 GiB left at 4096 tokens is
+// measured (one run, #101); the 2 GiB value is that plus headroom (the issue
+// proposes 1.5-2 GiB), the 64 KiB per token is fitted by eye to the table
+// above and nothing in it was measured with a peer. The 4096 cut-off is a
+// guess: the issue's matrix at 32768 and 131072 tokens is not in yet, and
+// until it is no context above 4096 gets the lower margin. The upgrade is the
+// buffer sizes llama-server's own fit reports for the context, which also
+// covers flash attention and the cache type, which this ignores.
 const (
 	fillMargin       = 3 << 30
-	fillMarginCtx    = 4096     // largest num_ctx that keeps the base margin
+	fillMarginCUDA   = 2 << 30
+	fillMarginCtx    = 4096     // largest num_ctx that may use fillMarginCUDA
 	fillMarginPerCtx = 64 << 10 // bytes added per token of num_ctx above fillMarginCtx
 )
 
-// fillMarginFor is the margin for a model loaded at numCtx tokens: fillMargin
-// up to fillMarginCtx, growing linearly after it, never smaller than
-// fillMargin for any context. numCtx is the per-slot context (opts.NumCtx); 0
-// or unset counts as the base.
-func fillMarginFor(numCtx int) uint64 {
-	if numCtx <= fillMarginCtx {
-		return fillMargin
+// fillMarginFor is the margin for a model loaded at numCtx tokens, the
+// per-slot context (opts.NumCtx; 0 or unset counts as unknown and gets the
+// full margin). Above fillMarginCtx it grows with numCtx and is never below
+// fillMargin; discreteCUDA is the local card only.
+func fillMarginFor(numCtx int, discreteCUDA bool) uint64 {
+	if numCtx > fillMarginCtx {
+		return fillMargin + uint64(numCtx-fillMarginCtx)*fillMarginPerCtx
 	}
-	return fillMargin + uint64(numCtx-fillMarginCtx)*fillMarginPerCtx
+	if discreteCUDA && numCtx > 0 {
+		return fillMarginCUDA
+	}
+	return fillMargin
 }
 
 // fillSplit lays the model out for speed instead of for free memory: the
@@ -350,8 +365,7 @@ func fillSplit(gpus []ml.DeviceInfo, need uint64, numCtx int, peers []Peer) (kep
 	ranked := slices.Clone(peers)
 	sort.SliceStable(ranked, func(i, j int) bool { return peerFreeMemory(ranked[i]) > peerFreeMemory(ranked[j]) })
 
-	margin := fillMarginFor(numCtx)
-	room := func(free uint64) uint64 {
+	room := func(free, margin uint64) uint64 {
 		if free > margin {
 			return free - margin
 		}
@@ -363,10 +377,10 @@ func fillSplit(gpus []ml.DeviceInfo, need uint64, numCtx int, peers []Peer) (kep
 		left -= n
 		return n
 	}
-	localTake := take(room(localAvailable(gpus)))
+	localTake := take(room(localAvailable(gpus), fillMarginFor(numCtx, strings.EqualFold(gpus[0].Library, "CUDA"))))
 	var shares []string
 	for _, p := range ranked {
-		if n := take(room(peerFreeMemory(p))); n > 0 {
+		if n := take(room(peerFreeMemory(p), fillMarginFor(numCtx, false))); n > 0 {
 			kept = append(kept, rpcAddr(p))
 			shares = append(shares, strconv.FormatUint(n>>20, 10))
 		}

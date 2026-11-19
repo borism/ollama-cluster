@@ -261,7 +261,7 @@ with zero cluster peers.
 With one local GPU, the server does not leave the split to llama-server's
 default, which is proportional to each device's free memory and so puts
 weights on a slow peer just because it has room. It fills the local GPU
-first (keeping 3 GiB back for compute buffers and the CUDA/Metal context, plus 64 KiB per token of `num_ctx` above 4096),
+first (keeping 3 GiB back for compute buffers and the CUDA/Metal context, plus 64 KiB per token of `num_ctx` above 4096; a local discrete CUDA card at `num_ctx` 4096 or less keeps 2 GiB),
 then the candidate peers largest-free-memory first, and passes the result as
 `--tensor-split`. A peer that would get nothing is left out of `--rpc`. If
 the model doesn't fit the devices at all, or the host has no GPU, an
