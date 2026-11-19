@@ -85,7 +85,7 @@ func TestSelectRPCServers(t *testing.T) {
 			predict: mib(10000),
 			peers: []Peer{
 				peer("10.0.0.2", 50052, RPCProtoMajor+1, 0, 50000),
-				peer("10.0.0.3", 50052, RPCProtoMajor, 0, 9000),
+				peer("10.0.0.3", 50052, RPCProtoMajor, 0, 12000),
 			},
 			wantRPCs: "10.0.0.3:50052",
 		},
@@ -95,7 +95,7 @@ func TestSelectRPCServers(t *testing.T) {
 			predict: mib(10000),
 			peers: []Peer{
 				peer("10.0.0.2", 50052, RPCProtoMajor, RPCProtoMinor+1, 50000),
-				peer("10.0.0.3", 50052, RPCProtoMajor, 0, 9000),
+				peer("10.0.0.3", 50052, RPCProtoMajor, 0, 12000),
 			},
 			wantRPCs: "10.0.0.3:50052",
 		},
@@ -105,7 +105,7 @@ func TestSelectRPCServers(t *testing.T) {
 			predict: mib(10000),
 			peers: []Peer{
 				peer("10.0.0.2", 0, RPCProtoMajor, 0, 50000),
-				peer("10.0.0.3", 50052, RPCProtoMajor, 0, 9000),
+				peer("10.0.0.3", 50052, RPCProtoMajor, 0, 12000),
 			},
 			wantRPCs: "10.0.0.3:50052",
 		},
@@ -125,14 +125,16 @@ func TestSelectRPCServers(t *testing.T) {
 			wantRPCs: "",
 		},
 		{
-			name:    "partial help still added when no peer covers it fully",
+			// A peer's share is llama.cpp's proportional split, which a small
+			// peer can't be capped out of (#100): load locally instead.
+			name:    "peers that can't cover the shortfall are not used",
 			gpus:    []ml.DeviceInfo{gpu(100)},
 			predict: mib(100000),
 			peers: []Peer{
 				peer("10.0.0.2", 50052, RPCProtoMajor, 0, 5000),
 				peer("10.0.0.3", 50052, RPCProtoMajor, 0, 3000),
 			},
-			wantRPCs: "10.0.0.2:50052,10.0.0.3:50052",
+			wantRPCs: "",
 		},
 	}
 
@@ -166,7 +168,7 @@ func TestSelectRPCServersMinUsefulMemory(t *testing.T) {
 func TestSelectRPCServersMinUsefulMemoryBoundary(t *testing.T) {
 	got := SelectRPCServers(
 		[]ml.DeviceInfo{gpu(100)},
-		mib(10000),
+		mib(1000),
 		[]Peer{peer("10.0.0.2", 50052, RPCProtoMajor, 0, 1200)},
 		api.Options{},
 	)
@@ -225,7 +227,7 @@ func TestSelectRPCServersSkipsIPv6LinkLocal(t *testing.T) {
 	t.Cleanup(func() { slog.SetDefault(old) })
 
 	linkLocal := peer("fe80::1", 50052, RPCProtoMajor, 0, 50000)
-	v4 := peer("10.0.0.3", 50052, RPCProtoMajor, 0, 9000)
+	v4 := peer("10.0.0.3", 50052, RPCProtoMajor, 0, 12000)
 
 	got := SelectRPCServers([]ml.DeviceInfo{gpu(100)}, mib(10000), []Peer{linkLocal, v4}, api.Options{})
 	if got.RPCServers != "10.0.0.3:50052" {
@@ -682,5 +684,35 @@ func TestTensorSplitNeedsExplicitRPCServers(t *testing.T) {
 	explicit := api.Options{Runner: api.Runner{RPCServers: "10.0.0.3:50052,10.0.0.2:50052", TensorSplit: "4,6,10"}}
 	if got := SelectReachableRPCServers(gpus, mib(25600), peers, explicit, dial); got.TensorSplit != "4,6,10" || got.RPCServers != explicit.RPCServers {
 		t.Errorf("explicit rpc_servers: got %q / %q, want the request's own", got.RPCServers, got.TensorSplit)
+	}
+}
+
+// TestSelectRPCServersPeersCannotCoverShortfall is #100: predicted 36.3 GiB,
+// local 17.4 GiB, one peer advertising 8 GiB. It used to be nominated with no
+// split, and llama.cpp then put 23 GiB on it. Now it is left out (and the log
+// says so); a second peer that brings the total to the shortfall brings it back.
+func TestSelectRPCServersPeersCannotCoverShortfall(t *testing.T) {
+	var buf bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(old) })
+
+	gpus := []ml.DeviceInfo{gpu(18125)} // 17.4 GiB after the reserve
+	small := peerAt("10.0.0.2", 8192, 0, 0)
+
+	for _, policy := range []string{"waterfill", "greedy"} {
+		got := SelectRPCServers(gpus, mib(37171), []Peer{small}, api.Options{Runner: api.Runner{RPCPlacement: policy}})
+		if got.RPCServers != "" || got.TensorSplit != "" {
+			t.Errorf("%s: got rpc %q split %q, want local load", policy, got.RPCServers, got.TensorSplit)
+		}
+	}
+	if !strings.Contains(buf.String(), "peers cannot cover the shortfall") {
+		t.Errorf("no warning in log:\n%s", buf.String())
+	}
+
+	// 8 + 12 GiB covers the 18.9 GiB shortfall.
+	got := SelectRPCServers(gpus, mib(37171), []Peer{small, peerAt("10.0.0.3", 12288, 0, 0)}, api.Options{})
+	if got.RPCServers == "" {
+		t.Errorf("peers that cover the shortfall were not used")
 	}
 }
