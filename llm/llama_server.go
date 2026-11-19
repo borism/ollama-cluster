@@ -1339,11 +1339,38 @@ func (s *llamaServerRunner) Ping(ctx context.Context) error {
 	return err
 }
 
+// peerUploadMinRate is the slowest sustained rate (bytes/s) we assume when
+// llama-server uploads tensors to RPC peers. llama.cpp logs nothing during the
+// upload, so the stall timeout is raised to peer bytes / this rate. Tunable
+// guess: a 1 Gbit link measured about 79 MB/s. Not an env var on purpose.
+var peerUploadMinRate uint64 = 20 << 20
+
+// peerUploadLogInterval is how often WaitUntilRunning logs that a load with
+// peer data is still going. Those lines do not count as load activity.
+var peerUploadLogInterval = 30 * time.Second
+
+// loadStallTimeout returns the stall timeout: OLLAMA_LOAD_TIMEOUT, raised to
+// the time peer data needs at peerUploadMinRate.
+// ponytail: peer bytes come from the logged buffer sizes (model + KV +
+// compute), which overstates the upload slightly; exact upload bytes need
+// llama.cpp support.
+func (s *llamaServerRunner) loadStallTimeout(base time.Duration) time.Duration {
+	var peerBytes uint64
+	for _, b := range s.RPCVRAM() {
+		peerBytes += b
+	}
+	if need := time.Duration(peerBytes/peerUploadMinRate) * time.Second; need > base {
+		return need
+	}
+	return base
+}
+
 func (s *llamaServerRunner) WaitUntilRunning(ctx context.Context) error {
 	s.startLoadTracking(time.Now())
 	defer s.stopLoadTracking()
 
-	stallTimeout := envconfig.LoadTimeout()
+	baseTimeout := envconfig.LoadTimeout()
+	nextPeerLog := time.Now().Add(peerUploadLogInterval)
 	lastActivity := s.lastLoadActivity()
 	if lastActivity.IsZero() {
 		lastActivity = s.loadStart
@@ -1351,7 +1378,6 @@ func (s *llamaServerRunner) WaitUntilRunning(ctx context.Context) error {
 	if lastActivity.IsZero() {
 		lastActivity = time.Now()
 	}
-	loadDeadline := lastActivity.Add(stallTimeout)
 
 	slog.Info("waiting for llama-server to start responding")
 	var lastStatus ServerStatus = -1
@@ -1389,10 +1415,10 @@ func (s *llamaServerRunner) WaitUntilRunning(ctx context.Context) error {
 
 		if activity := s.lastLoadActivity(); activity.After(lastActivity) {
 			lastActivity = activity
-			loadDeadline = lastActivity.Add(stallTimeout)
 		}
 
-		if time.Now().After(loadDeadline) {
+		stallTimeout := s.loadStallTimeout(baseTimeout)
+		if time.Now().After(lastActivity.Add(stallTimeout)) {
 			msg := s.lastErrMsg()
 			return fmt.Errorf("timed out waiting for llama-server to start - %s", msg)
 		}
@@ -1412,7 +1438,17 @@ func (s *llamaServerRunner) WaitUntilRunning(ctx context.Context) error {
 		}
 		if statusChanged && status == ServerStatusLoadingModel {
 			lastActivity = time.Now()
-			loadDeadline = lastActivity.Add(stallTimeout)
+		}
+
+		if now := time.Now(); now.After(nextPeerLog) {
+			nextPeerLog = now.Add(peerUploadLogInterval)
+			if peer := s.RPCVRAM(); len(peer) > 0 {
+				var total uint64
+				for _, b := range peer {
+					total += b
+				}
+				slog.Info("still loading", "peer_gib", float64(total)/(1<<30), "elapsed", now.Sub(s.loadStart).Round(time.Second), "stall_timeout", stallTimeout)
+			}
 		}
 
 		switch status {

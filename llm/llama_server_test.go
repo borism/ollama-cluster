@@ -1175,6 +1175,56 @@ func TestLlamaServerWaitUntilRunningExtendsTimeoutOnOutputActivity(t *testing.T)
 	}
 }
 
+// A silent load longer than OLLAMA_LOAD_TIMEOUT must survive when enough data
+// was placed on a peer, and must still time out when none was.
+func TestLlamaServerWaitUntilRunningScalesTimeoutWithPeerBytes(t *testing.T) {
+	t.Setenv("OLLAMA_LOAD_TIMEOUT", "50ms")
+	// 1 MiB on a peer at 1 MiB/s raises the floor to 1s.
+	old := peerUploadMinRate
+	peerUploadMinRate = 1 << 20
+	defer func() { peerUploadMinRate = old }()
+
+	for _, tc := range []struct {
+		name      string
+		peerBytes uint64
+		wantErr   bool
+	}{
+		{"peer data raises the floor", 1 << 20, false},
+		{"no peer data keeps the configured timeout", 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			start := time.Now()
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if time.Since(start) < 300*time.Millisecond {
+					w.WriteHeader(http.StatusServiceUnavailable)
+					fmt.Fprint(w, `{"status":"loading model"}`)
+					return
+				}
+				fmt.Fprint(w, `{"status":"ok"}`)
+			}))
+			defer srv.Close()
+
+			var portInt int
+			parts := strings.Split(srv.URL, ":")
+			fmt.Sscanf(parts[len(parts)-1], "%d", &portInt)
+
+			runner := &llamaServerRunner{port: portInt, cmd: fakeRunningCmd()}
+			if tc.peerBytes > 0 {
+				runner.vramByDevice = map[string]uint64{"RPC0": tc.peerBytes, "CUDA0": 1 << 40}
+			}
+
+			err := runner.WaitUntilRunning(t.Context())
+			if tc.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "timed out waiting for llama-server to start") {
+					t.Fatalf("expected load timeout, got %v", err)
+				}
+			} else if err != nil {
+				t.Fatalf("WaitUntilRunning error: %v", err)
+			}
+		})
+	}
+}
+
 func TestLlamaServerCompletionRequestFormat(t *testing.T) {
 	tests := []struct {
 		name           string
