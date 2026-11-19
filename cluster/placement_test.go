@@ -403,6 +403,33 @@ func TestSelectReachableRPCServers(t *testing.T) {
 	})
 }
 
+// TestFillMarginGrowsWithContext: the margin is the flat fillMargin up to
+// fillMarginCtx and never shrinks as num_ctx grows, so a long context keeps
+// more back on every device.
+func TestFillMarginGrowsWithContext(t *testing.T) {
+	prev := uint64(0)
+	for _, n := range []int{0, 2048, fillMarginCtx, fillMarginCtx + 1, 8192, 65536, 262144} {
+		m := fillMarginFor(n)
+		if m < fillMargin || m < prev {
+			t.Fatalf("fillMarginFor(%d) = %d: below fillMargin (%d) or the smaller context's (%d)", n, m, uint64(fillMargin), prev)
+		}
+		prev = m
+	}
+	if got := fillMarginFor(fillMarginCtx); got != fillMargin {
+		t.Fatalf("fillMarginFor(%d) = %d, want the base %d", fillMarginCtx, got, uint64(fillMargin))
+	}
+
+	// Same fleet as TestSelectRPCServersFillsLocalFirst at 65536 tokens: the
+	// margin is 3072 + 61440 * 64 KiB = 6912 MiB, so GPU room = 18125 - 457 -
+	// 6912 = 10756 and the peer takes the other 14844.
+	gpus := []ml.DeviceInfo{gpu(18125)}
+	peers := []Peer{peerAt("10.0.0.2", 25600, 0, time.Millisecond)}
+	got := SelectRPCServers(gpus, mib(25600), peers, api.Options{Runner: api.Runner{NumCtx: 65536}})
+	if got.TensorSplit != "14844,10756" {
+		t.Fatalf("65536 ctx: split %q, want 14844,10756", got.TensorSplit)
+	}
+}
+
 // TestSelectRPCServersFillsLocalFirst: a 20 GiB GPU (17.7 GiB free) next to a
 // big fast-enough peer and a small slow one. The default (waterfill) policy
 // used to list both peers and let llama.cpp split by free memory, which put

@@ -205,7 +205,7 @@ func selectRPCServers(gpus []ml.DeviceInfo, predicted uint64, peers []Peer, opts
 
 	opts.RPCServers = strings.Join(addrs, ",")
 	if opts.TensorSplit == "" {
-		if picked, split, ok := fillSplit(gpus, predicted, peersAt(usable, addrs)); ok {
+		if picked, split, ok := fillSplit(gpus, predicted, opts.NumCtx, peersAt(usable, addrs)); ok {
 			opts.RPCServers = strings.Join(picked, ",")
 			opts.TensorSplit = split
 		}
@@ -299,7 +299,33 @@ func peersAt(usable []Peer, addrs []string) []Peer {
 // entirely, everything but weights and KV came to 1.2-3.6 GiB with flash
 // attention on (growing with context) and up to 6.1 GiB with it off; see
 // docs/cluster-benchmarks.mdx#vram-estimate-vs-measured-use-november-2026.
-const fillMargin = 3 << 30
+//
+// The 3 GiB is for contexts up to fillMarginCtx; beyond that the compute
+// buffers keep growing, so fillMarginFor adds fillMarginPerCtx per token. The
+// same data had the need exceed the projection by up to 4 GiB at 65536 and
+// 262144 tokens with flash attention on, and 8.4 GiB with it off.
+//
+// ponytail: both constants are tunable, not measured. Nothing here lowers the
+// margin below 3 GiB, since no memory was measured with a peer attached;
+// lowering it for a small context, or sizing it from flash attention and the
+// cache type, needs a measured run on the build that carries llama.cpp's
+// newer layer-input and rotation buffers.
+const (
+	fillMargin       = 3 << 30
+	fillMarginCtx    = 4096     // largest num_ctx that keeps the base margin
+	fillMarginPerCtx = 64 << 10 // bytes added per token of num_ctx above fillMarginCtx
+)
+
+// fillMarginFor is the margin for a model loaded at numCtx tokens: fillMargin
+// up to fillMarginCtx, growing linearly after it, never smaller than
+// fillMargin for any context. numCtx is the per-slot context (opts.NumCtx); 0
+// or unset counts as the base.
+func fillMarginFor(numCtx int) uint64 {
+	if numCtx <= fillMarginCtx {
+		return fillMargin
+	}
+	return fillMargin + uint64(numCtx-fillMarginCtx)*fillMarginPerCtx
+}
 
 // fillSplit lays the model out for speed instead of for free memory: the
 // local GPU takes as much as fits, then the peers in order of free memory
@@ -315,7 +341,7 @@ const fillMargin = 3 << 30
 // llama.cpp's call), an integrated GPU (not faster than a peer), or a model
 // that doesn't fit the devices at all (--fit then spills to CPU, and an
 // explicit split would turn that off).
-func fillSplit(gpus []ml.DeviceInfo, need uint64, peers []Peer) (kept []string, split string, ok bool) {
+func fillSplit(gpus []ml.DeviceInfo, need uint64, numCtx int, peers []Peer) (kept []string, split string, ok bool) {
 	if len(gpus) != 1 || gpus[0].Integrated {
 		return nil, "", false
 	}
@@ -324,9 +350,10 @@ func fillSplit(gpus []ml.DeviceInfo, need uint64, peers []Peer) (kept []string, 
 	ranked := slices.Clone(peers)
 	sort.SliceStable(ranked, func(i, j int) bool { return peerFreeMemory(ranked[i]) > peerFreeMemory(ranked[j]) })
 
+	margin := fillMarginFor(numCtx)
 	room := func(free uint64) uint64 {
-		if free > fillMargin {
-			return free - fillMargin
+		if free > margin {
+			return free - margin
 		}
 		return 0
 	}
