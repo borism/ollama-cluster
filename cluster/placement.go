@@ -195,6 +195,23 @@ func selectRPCServers(gpus []ml.DeviceInfo, predicted uint64, peers []Peer, opts
 	if len(usable) == 0 {
 		return opts, d
 	}
+	// Peers that together can't hold the shortfall are not used at all. The
+	// split is llama.cpp's: proportional to each device's reported free memory
+	// (never above it only while the devices can hold the whole model), and a
+	// user-set --tensor-split is only a ratio, so it can't cap a peer and send
+	// the rest to the CPU either (common/fit.cpp skips --fit when it is set).
+	// Loading locally gets the CPU spill, same as with no peers (#100).
+	// ponytail: all-or-nothing; capping a peer at its free memory and spilling
+	// the rest needs a layer count (-ngl) the scheduler would have to pass in.
+	var peerFree uint64
+	for _, p := range usable {
+		peerFree += peerFreeMemory(p)
+	}
+	if peerFree < predicted-local {
+		slog.Warn("cluster: peers cannot cover the shortfall, loading locally",
+			"shortfall", format.HumanBytes2(predicted-local), "peers_free", format.HumanBytes2(peerFree))
+		return opts, d
+	}
 
 	var addrs []string
 	if policy == "greedy" {

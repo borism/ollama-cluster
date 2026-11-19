@@ -247,14 +247,18 @@ back to CPU, exactly like a single machine with no cluster peers.
 
 Nothing has to special-case this: an RPC peer is just another entry in
 llama.cpp's own device list (remote devices become ordinary ggml
-devices). Peer selection doesn't try to guarantee full coverage
-either — if the shortfall can't be fully covered, it just uses every
-peer it can (`greedy` adds them all; `waterfill` converges to every peer
-maxed out at its own cap) and hands that list to `llama-server`. From
-there, `llama-server`'s own `--fit` decides, at actual load time and with
-real free-memory numbers, how many layers fit across local GPU(s) + every
-RPC peer + CPU combined — the same layer-placement logic that already runs
+devices). Peer selection hands `llama-server` the peers it picked and
+`llama-server`'s own `--fit` decides, at actual load time and with real
+free-memory numbers, how many layers fit across local GPU(s) + every RPC
+peer + CPU combined — the same layer-placement logic that already runs
 with zero cluster peers.
+
+One exception: if the usable peers' free memory together is less than the
+shortfall, none of them is used and the model loads locally, with the rest
+on the CPU, and the server logs `cluster: peers cannot cover the shortfall`.
+llama.cpp splits by what each device reports, which can hand a small peer
+far more than it advertised (it can report host RAM as device memory), and
+the load then stalls.
 
 ### Which peers get weights
 
