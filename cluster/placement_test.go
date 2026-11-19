@@ -403,6 +403,53 @@ func TestSelectReachableRPCServers(t *testing.T) {
 	})
 }
 
+// TestFillMarginByContext: the margin is the flat fillMargin except for the
+// local discrete CUDA card at a context up to fillMarginCtx, where it is the
+// smaller fillMarginCUDA, and above fillMarginCtx it only grows, so a long
+// context never keeps less back than a short one.
+func TestFillMarginByContext(t *testing.T) {
+	if fillMarginCUDA >= fillMargin {
+		t.Fatalf("fillMarginCUDA %d is not below fillMargin %d", uint64(fillMarginCUDA), uint64(fillMargin))
+	}
+	if got := fillMarginFor(4096, true); got != fillMarginCUDA {
+		t.Fatalf("CUDA at 4096 = %d, want %d", got, uint64(fillMarginCUDA))
+	}
+	for _, c := range []struct {
+		n    int
+		cuda bool
+	}{{4096, false}, {0, true}, {0, false}} {
+		if got := fillMarginFor(c.n, c.cuda); got != fillMargin {
+			t.Fatalf("fillMarginFor(%d, %v) = %d, want the full %d", c.n, c.cuda, got, uint64(fillMargin))
+		}
+	}
+	prev := uint64(0)
+	for _, n := range []int{fillMarginCtx + 1, 8192, 65536, 262144} {
+		for _, cuda := range []bool{false, true} {
+			if m := fillMarginFor(n, cuda); m < fillMargin || m < prev {
+				t.Fatalf("fillMarginFor(%d, %v) = %d: below fillMargin or the smaller context's %d", n, cuda, m, prev)
+			}
+		}
+		prev = fillMarginFor(n, true)
+	}
+
+	// The #101 card: 17.4 GiB available after the reserve (17817 MiB, plus the
+	// 457 MiB reserve localAvailable takes), CUDA, one peer. At 4096 tokens the
+	// card takes 17817 - 2048 = 15769 MiB, not the 14745 of a flat 3 GiB.
+	cuda := ml.DeviceInfo{FreeMemory: mib(17817 + 457)}
+	cuda.Library = "CUDA"
+	peers := []Peer{peerAt("10.0.0.2", 25600, 0, time.Millisecond)}
+	got := SelectRPCServers([]ml.DeviceInfo{cuda}, mib(37171), peers, api.Options{Runner: api.Runner{NumCtx: 4096}})
+	if got.TensorSplit != "21402,15769" {
+		t.Fatalf("4096 ctx: split %q, want 21402,15769", got.TensorSplit)
+	}
+	// At 65536 tokens the margin is 3072 + 61440 * 64 KiB = 6912 MiB: the card
+	// takes 17817 - 6912 = 10905 MiB and the peer the other 14695.
+	got = SelectRPCServers([]ml.DeviceInfo{cuda}, mib(25600), peers, api.Options{Runner: api.Runner{NumCtx: 65536}})
+	if got.TensorSplit != "14695,10905" {
+		t.Fatalf("65536 ctx: split %q, want 14695,10905", got.TensorSplit)
+	}
+}
+
 // TestSelectRPCServersFillsLocalFirst: a 20 GiB GPU (17.7 GiB free) next to a
 // big fast-enough peer and a small slow one. The default (waterfill) policy
 // used to list both peers and let llama.cpp split by free memory, which put
