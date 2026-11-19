@@ -11,6 +11,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -401,6 +402,43 @@ func TestSelectReachableRPCServers(t *testing.T) {
 			t.Errorf("RPCServers = %q, dialed %v; want passed through undialed", got.RPCServers, dialed)
 		}
 	})
+}
+
+// TestSelectReachableRPCServersRetriesRestart: a peer whose hello is reset
+// right after an unload is kept once its worker is back, and one that stays
+// down (or is absent rather than restarting) is dropped within the window (#99).
+func TestSelectReachableRPCServersRetriesRestart(t *testing.T) {
+	oldWindow, oldEvery := rpcRetryWindow, rpcRetryEvery
+	rpcRetryWindow, rpcRetryEvery = 200*time.Millisecond, 10*time.Millisecond
+	t.Cleanup(func() { rpcRetryWindow, rpcRetryEvery = oldWindow, oldEvery })
+
+	reset := fmt.Errorf("rpc hello: %w", syscall.ECONNRESET)
+	gpus := []ml.DeviceInfo{gpu(100)}
+	peers := []Peer{peer("10.0.0.2", 50052, RPCProtoMajor, 0, 20000)}
+	pick := func(dial func(string) error) (string, time.Duration) {
+		start := time.Now()
+		got := SelectReachableRPCServers(gpus, mib(4000), peers, api.Options{}, dial)
+		return got.RPCServers, time.Since(start)
+	}
+
+	calls := 0
+	if got, _ := pick(func(string) error {
+		if calls++; calls <= 2 {
+			return reset
+		}
+		return nil
+	}); got != "10.0.0.2:50052" || calls != 3 {
+		t.Errorf("reset twice then up: RPCServers %q after %d dials, want kept after 3", got, calls)
+	}
+
+	if got, took := pick(func(string) error { return reset }); got != "" || took < rpcRetryWindow-rpcRetryEvery || took > 2*rpcRetryWindow {
+		t.Errorf("always reset: RPCServers %q after %v, want dropped after about %v", got, took, rpcRetryWindow)
+	}
+
+	calls = 0
+	if got, _ := pick(func(string) error { calls++; return errors.New("rpc hello: worker speaks protocol 5.0") }); got != "" || calls != 1 {
+		t.Errorf("protocol mismatch: RPCServers %q after %d dials, want dropped after 1", got, calls)
+	}
 }
 
 // TestSelectRPCServersFillsLocalFirst: a 20 GiB GPU (17.7 GiB free) next to a

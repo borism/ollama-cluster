@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -14,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/borism/ollama-cluster/api"
@@ -460,7 +462,7 @@ func rpcHostProblem(host string) string {
 //
 // dial is DialRPC in production; it is a parameter so tests don't need real
 // listeners. It runs while the scheduler holds its load lock, which is why
-// it's bounded by probeTimeout plus rpcHelloTimeout.
+// it's bounded by rpcRetryWindow plus probeTimeout plus rpcHelloTimeout.
 //
 // It logs one placement line for the whole decision, not one per round. That
 // line names the skipped peers the caller passed and the peers dropped here as
@@ -483,7 +485,7 @@ func SelectReachableRPCServers(gpus []ml.DeviceInfo, predicted uint64, peers []P
 		errs := make([]error, len(addrs))
 		var wg sync.WaitGroup
 		for i, addr := range addrs {
-			wg.Go(func() { errs[i] = dial(addr) })
+			wg.Go(func() { errs[i] = dialRetry(dial, addr) })
 		}
 		wg.Wait()
 
@@ -506,6 +508,42 @@ func SelectReachableRPCServers(gpus []ml.DeviceInfo, predicted uint64, peers []P
 			}
 			return err != nil
 		})
+	}
+}
+
+// rpcRetryWindow/rpcRetryEvery: how long, and how often, dialRetry retries a
+// peer whose worker is mid-restart. Tunable; not measured beyond the one
+// observed restart (exit a few seconds after the reset, back ~2 s later).
+// Vars so tests can shrink them.
+var (
+	rpcRetryWindow = 10 * time.Second
+	rpcRetryEvery  = 500 * time.Millisecond
+)
+
+// restarting reports whether err looks like a worker that is coming up or
+// going down (reset, refused, hung up), as opposed to one that is absent
+// (timeout, no route) or speaks another protocol, which retrying won't fix.
+func restarting(err error) bool {
+	return errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.Is(err, syscall.EPIPE) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+}
+
+// dialRetry is dial, retried for up to rpcRetryWindow while it fails the way
+// a restarting worker does. After an unload the ggml-rpc-server exits when its
+// connection closes and is restarted, which can take tens of seconds under
+// memory pressure; it resets the hello until then (#99). Peers reaching here
+// have a fresh beacon (Table.Peers drops stale ones), so they get the window;
+// a dead peer still costs at most the window, and a timed-out or mismatched
+// one is dropped at once.
+// ponytail: fixed window, no backoff or jitter; per-peer adaptive if tuning shows need.
+func dialRetry(dial func(addr string) error, addr string) error {
+	deadline := time.Now().Add(rpcRetryWindow)
+	for {
+		err := dial(addr)
+		if err == nil || !restarting(err) || time.Now().Add(rpcRetryEvery).After(deadline) {
+			return err
+		}
+		time.Sleep(rpcRetryEvery)
 	}
 }
 
