@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/binary"
@@ -50,6 +51,13 @@ type Table struct {
 	// bridge address, which only the *other* end of that cable can ever
 	// dial -- stops being redialed every probeInterval forever.
 	backoff map[string]probeBackoff
+
+	// links is each "peerID|addr" candidate's last bandwidth measurement
+	// (see linkBandwidth), and bwPort the TCP port to measure on; zero (a
+	// Table built without Start) turns candidate comparison by bandwidth
+	// off.
+	links  map[string]linkStat
+	bwPort int
 }
 
 // Stopped is closed once discovery has shut down after its context was
@@ -243,6 +251,7 @@ func Start(ctx context.Context, cfg Config) (*Table, error) {
 		peers:   make(map[string]Peer),
 		ttl:     cfg.TTL,
 		stopped: make(chan struct{}),
+		bwPort:  cfg.Port,
 	}
 
 	go broadcastLoop(ctx, conn, cfg, t)
@@ -492,10 +501,6 @@ func probePeer(t *Table, p Peer) {
 		candidates = []string{p.Addr}
 	}
 
-	type probed struct {
-		addr    string
-		latency time.Duration
-	}
 	results := make(chan probed, len(candidates))
 
 	var wg sync.WaitGroup
@@ -531,18 +536,101 @@ func probePeer(t *Table, p Peer) {
 	wg.Wait()
 	close(results)
 
-	var bestAddr string
-	var bestLatency time.Duration
+	var got []probed
 	for r := range results {
-		if bestAddr == "" || r.latency < bestLatency {
-			bestAddr, bestLatency = r.addr, r.latency
-		}
+		got = append(got, r)
 	}
-	if bestAddr == "" {
+	if len(got) == 0 {
 		return // every due candidate failed, keep the last-known address
 	}
-	slog.Debug("cluster: probed peer latency", "id", p.ID, "addr", bestAddr, "latency", bestLatency)
+	slices.SortFunc(got, func(a, b probed) int { return cmp.Compare(a.latency, b.latency) })
+
+	// Candidates whose latency is indistinguishable from the fastest (a
+	// switch link and a direct cable both connect in under 1 ms) can't be
+	// told apart by it, so measure their bandwidth. Measured one at a time
+	// so two links on one NIC don't skew each other, and cached for
+	// bandwidthInterval so this isn't a push every probe.
+	bw := map[string]float64{}
+	if t.bwPort != 0 {
+		if cl := closeCandidates(got); len(cl) > 1 {
+			for _, c := range cl {
+				mbps := t.linkBandwidth(p.ID, c.addr)
+				if mbps == 0 {
+					var err error
+					if mbps, err = measureBandwidth(c.addr, t.bwPort); err != nil {
+						slog.Debug("cluster: candidate bandwidth probe failed", "id", p.ID, "addr", c.addr, "error", err)
+						continue
+					}
+					t.setLinkBandwidth(p.ID, c.addr, mbps)
+				}
+				bw[c.addr] = mbps
+			}
+		}
+	}
+
+	bestAddr := chooseAddr(got, p.Addr, bw)
+	var bestLatency time.Duration
+	for _, r := range got {
+		if r.addr == bestAddr {
+			bestLatency = r.latency
+		}
+	}
+	slog.Debug("cluster: probed peer latency", "id", p.ID, "addr", bestAddr, "latency", bestLatency, "mbps", bw[bestAddr])
 	t.setBest(p.ID, bestAddr, bestLatency)
+	if bw[bestAddr] > 0 {
+		t.setBandwidth(p.ID, bw[bestAddr])
+	}
+}
+
+// probed is one candidate address that answered a latency probe.
+type probed struct {
+	addr    string
+	latency time.Duration
+}
+
+// Tunable, not yet measured on real hardware: candidates within
+// linkCloseRatio x the fastest latency or linkCloseSlack of it count as
+// the same latency; among those, the current address is only given up
+// for one linkSwitchRatio x faster, so measurement noise (a probe taken
+// while a load is running reads low) doesn't flip the choice.
+const (
+	linkCloseRatio  = 2
+	linkCloseSlack  = 500 * time.Microsecond
+	linkSwitchRatio = 1.25
+)
+
+// closeCandidates returns the candidates of got (sorted by latency) that
+// are latency-indistinguishable from the fastest.
+func closeCandidates(got []probed) []probed {
+	n := 0
+	for n < len(got) && (got[n].latency <= linkCloseRatio*got[0].latency || got[n].latency-got[0].latency <= linkCloseSlack) {
+		n++
+	}
+	return got[:n]
+}
+
+// chooseAddr picks the peer address from got (sorted by latency): the
+// fastest by latency, unless several are close, then the one with the
+// highest measured bandwidth in bw. The current address wins ties and
+// near-ties (see linkSwitchRatio), and when nothing was measured.
+func chooseAddr(got []probed, current string, bw map[string]float64) string {
+	cl := closeCandidates(got)
+	curClose := slices.ContainsFunc(cl, func(c probed) bool { return c.addr == current })
+	top := ""
+	for _, c := range cl {
+		if bw[c.addr] > bw[top] {
+			top = c.addr
+		}
+	}
+	switch {
+	case top == "" && curClose:
+		return current // no measurement to go on, don't flap on latency noise
+	case top == "":
+		return got[0].addr
+	case curClose && bw[current] > 0 && bw[top] < bw[current]*linkSwitchRatio:
+		return current
+	}
+	return top
 }
 
 // listenLoop reads incoming beacons and updates the table, ignoring our own.

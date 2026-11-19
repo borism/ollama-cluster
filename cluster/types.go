@@ -22,7 +22,9 @@ type Peer struct {
 	ID string
 
 	// Addr is our current best address for this peer: of Addrs, the one
-	// probeLoop last measured the lowest RPC-port latency over. Until the
+	// probeLoop last measured the lowest RPC-port latency over, or, among
+	// addresses whose latency is about the same, the one with the most
+	// measured bandwidth (see chooseAddr). Until the
 	// first probe completes it's provisionally the source IP the beacon
 	// was seen from.
 	Addr string

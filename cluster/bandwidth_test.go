@@ -4,9 +4,12 @@ import (
 	"context"
 	"net"
 	"testing"
+	"time"
 )
 
 func TestBandwidthRoundTrip(t *testing.T) {
+	defer func(d time.Duration) { bandwidthDuration = d }(bandwidthDuration)
+	bandwidthDuration = 50 * time.Millisecond
 	ln, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
