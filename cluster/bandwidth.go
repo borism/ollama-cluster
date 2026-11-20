@@ -12,12 +12,17 @@ import (
 	"time"
 )
 
-// bandwidthPayloadSize is how much data one bandwidth probe pushes through
-// a peer's link. Big enough that TCP's initial slow-start window doesn't
-// dominate the measurement on a fast link (Thunderbolt/10GbE), small
-// enough that testing a peer costs at most a few hundred ms on any link
-// worth using for RPC.
-const bandwidthPayloadSize = 4 * 1024 * 1024 // 4 MiB
+// bandwidthDuration is how long one bandwidth probe keeps pushing data at
+// a peer's link. Time-based rather than a fixed payload so it can fill a
+// fast link (a 2.5 Gbit link moves 4 MiB in ~13 ms, mostly TCP slow-start,
+// which understated it badly) while a slow one still costs only this long.
+// A var so tests can shorten it. Tunable; not yet measured across link
+// speeds on real hardware.
+var bandwidthDuration = 500 * time.Millisecond
+
+// bandwidthChunk is the size of one write while pushing data, small enough
+// that the duration check is honored within a chunk even on a slow link.
+const bandwidthChunk = 256 * 1024
 
 // bandwidthInterval is how often each peer's link is re-measured. Far
 // longer than probeInterval (latency, a handshake-only dial) on purpose:
@@ -26,10 +31,10 @@ const bandwidthPayloadSize = 4 * 1024 * 1024 // 4 MiB
 const bandwidthInterval = 5 * time.Minute
 
 // bandwidthTimeout bounds one bandwidth probe end to end (dial, send,
-// reply). 4 MiB at even a slow 10 Mbps link is ~3.2s; 10s leaves headroom
-// without letting one struggling peer stall past its own probe (peers are
-// measured concurrently, see bandwidthOnce, but each still needs its own
-// ceiling).
+// reply): bandwidthDuration plus draining whatever the link still has
+// buffered. 10s keeps one struggling peer from stalling past its own probe
+// (peers are measured concurrently, see bandwidthOnce, but each still needs
+// its own ceiling).
 const bandwidthTimeout = 10 * time.Second
 
 // bandwidthResult is what the receiving end reports back over the same
@@ -74,8 +79,8 @@ func acceptBandwidthConns(ctx context.Context, ln net.Listener) {
 }
 
 // serveBandwidthConn reads one probe's payload to EOF -- the client
-// half-closes its write side once it has sent bandwidthPayloadSize bytes
-// -- and reports back how long that took.
+// half-closes its write side once bandwidthDuration is up -- and reports
+// back how much arrived and how long that took.
 func serveBandwidthConn(conn net.Conn) {
 	defer conn.Close()
 	conn.SetDeadline(time.Now().Add(bandwidthTimeout))
@@ -123,41 +128,95 @@ func bandwidthOnce(t *Table, port int) {
 	wg.Wait()
 }
 
-// bandwidthPeer pushes bandwidthPayloadSize bytes at p's address and
-// records the throughput the far end reports back. A failure just leaves
-// the peer's last-known BandwidthMbps in place (or zero, if never
-// measured) and is retried next bandwidthInterval.
+// bandwidthPeer measures p's current best address and records the result
+// as the peer's BandwidthMbps. A failure just leaves the peer's last-known
+// BandwidthMbps in place (or zero, if never measured) and is retried next
+// bandwidthInterval.
 //
 // ponytail: no backoff here, unlike probePeer's per-candidate one -- this
 // already only runs once every bandwidthInterval per peer, so there's no
 // hot loop to protect against. Add one if a chronically-unreachable peer's
 // bandwidth port turns out to be a nuisance in practice.
 func bandwidthPeer(t *Table, p Peer, port int) {
-	addr := net.JoinHostPort(p.Addr, strconv.Itoa(port))
-	conn, err := net.DialTimeout("tcp", addr, bandwidthTimeout)
+	mbps, err := measureBandwidth(p.Addr, port)
 	if err != nil {
-		slog.Debug("cluster: bandwidth probe failed", "id", p.ID, "addr", addr, "error", err)
+		slog.Debug("cluster: bandwidth probe failed", "id", p.ID, "addr", p.Addr, "error", err)
 		return
+	}
+	slog.Debug("cluster: probed peer bandwidth", "id", p.ID, "addr", p.Addr, "mbps", mbps)
+	// Refresh, never create, a candidate's entry: an entry marks an address
+	// probePeer compared against a latency-equal rival and picked, which is
+	// what lets it be kept through a blip. An address that merely was the
+	// provisional one (a Wi-Fi beacon source) must not become sticky.
+	if t.linkBandwidth(p.ID, p.Addr) > 0 {
+		t.setLinkBandwidth(p.ID, p.Addr, mbps)
+	}
+	t.setBandwidth(p.ID, mbps)
+}
+
+// measureBandwidth pushes zeros at ip's bandwidth port for
+// bandwidthDuration and returns the throughput the far end reports back,
+// in megabits/sec.
+func measureBandwidth(ip string, port int) (float64, error) {
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(ip, strconv.Itoa(port)), bandwidthTimeout)
+	if err != nil {
+		return 0, err
 	}
 	defer conn.Close()
 	conn.SetDeadline(time.Now().Add(bandwidthTimeout))
 
-	if _, err := io.CopyN(conn, zeroReader{}, bandwidthPayloadSize); err != nil {
-		slog.Debug("cluster: bandwidth send", "id", p.ID, "addr", addr, "error", err)
-		return
+	buf := make([]byte, bandwidthChunk)
+	for end := time.Now().Add(bandwidthDuration); time.Now().Before(end); {
+		if _, err := conn.Write(buf); err != nil {
+			return 0, err
+		}
 	}
 	if tc, ok := conn.(*net.TCPConn); ok {
 		tc.CloseWrite()
 	}
 
 	var result bandwidthResult
-	if err := json.NewDecoder(conn).Decode(&result); err != nil || result.Nanos <= 0 {
-		slog.Debug("cluster: bandwidth result", "id", p.ID, "addr", addr, "error", err)
-		return
+	if err := json.NewDecoder(conn).Decode(&result); err != nil {
+		return 0, err
 	}
-	mbps := float64(result.Bytes*8) / (float64(result.Nanos) / 1e9) / 1e6
-	slog.Debug("cluster: probed peer bandwidth", "id", p.ID, "addr", addr, "mbps", mbps)
-	t.setBandwidth(p.ID, mbps)
+	if result.Nanos <= 0 {
+		return 0, fmt.Errorf("cluster: bandwidth reply has no duration")
+	}
+	return float64(result.Bytes*8) / (float64(result.Nanos) / 1e9) / 1e6, nil
+}
+
+// linkStat is one candidate address's last bandwidth measurement.
+type linkStat struct {
+	mbps float64
+	at   time.Time
+}
+
+// setLinkBandwidth records a measurement for one "peerID|addr" candidate,
+// so probePeer can compare candidates without re-measuring every 10s.
+func (t *Table) setLinkBandwidth(id, ip string, mbps float64) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.links == nil {
+		t.links = make(map[string]linkStat)
+	}
+	t.links[id+"|"+ip] = linkStat{mbps, time.Now()}
+}
+
+// linkBandwidthTTL is how long a candidate's measurement is used: two
+// bandwidthIntervals, so the current address (re-measured every interval by
+// bandwidthLoop) never lapses between refreshes, and a rival is re-measured
+// at most every ten minutes.
+const linkBandwidthTTL = 2 * bandwidthInterval
+
+// linkBandwidth returns a candidate's measurement if it is younger than
+// linkBandwidthTTL, else 0.
+func (t *Table) linkBandwidth(id, ip string) float64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if s, ok := t.links[id+"|"+ip]; ok && time.Since(s.at) < linkBandwidthTTL {
+		return s.mbps
+	}
+	return 0
 }
 
 // setBandwidth records a peer's last-measured link throughput. A no-op if
@@ -169,14 +228,4 @@ func (t *Table) setBandwidth(id string, mbps float64) {
 		p.BandwidthMbps = mbps
 		t.peers[id] = p
 	}
-}
-
-// zeroReader is an io.Reader that returns arbitrary (zero) bytes forever --
-// content doesn't matter for a throughput test, only volume, so there's no
-// need to allocate or reuse a real buffer for it.
-type zeroReader struct{}
-
-func (zeroReader) Read(b []byte) (int, error) {
-	clear(b)
-	return len(b), nil
 }
