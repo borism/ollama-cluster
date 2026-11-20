@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"maps"
+	"math"
 	"net"
 	"net/http"
 	"slices"
@@ -41,6 +42,8 @@ type request struct {
 	Grammar     *grammarCompilation
 }
 
+func (r request) context() context.Context { return r.Ctx }
+
 func (r request) reject(err error) {
 	r.Grammar.close()
 	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
@@ -68,12 +71,16 @@ func completionStatusError(err error) *api.StatusError {
 // An evaluation computes embeddings or decision scores from the supplied input without
 // entering the token decode loop. Its callback runs on the MLX worker.
 type evaluationRequest struct {
-	ctx  context.Context //nolint:containedctx // Queued requests carry caller cancellation to the runner.
-	open func(*batchSlot) (*evaluationState, error)
-	done chan error
+	ctx    context.Context //nolint:containedctx // Queued requests carry caller cancellation to the runner.
+	tokens []int32
+	items  []mediaItem
+	open   func(*batchSlot, []*prefixCache) (*evaluationState, error)
+	done   chan error
 }
 
 func (r *evaluationRequest) reject(err error) { r.done <- err }
+
+func (r *evaluationRequest) context() context.Context { return r.ctx }
 
 type speechRequest struct {
 	ctx   context.Context //nolint:containedctx // Queued requests carry caller cancellation to the runner.
@@ -85,29 +92,37 @@ type speechRequest struct {
 
 func (r *speechRequest) reject(err error) { r.done <- err }
 
+func (r *speechRequest) context() context.Context { return r.ctx }
+
 // All request types share admission and the same slot limit. Once admitted,
 // the scheduler advances each type using its own model operations.
 type queuedRequest interface {
+	context() context.Context
 	// reject releases a request that has not acquired a slot.
 	reject(error)
 }
 
 type Runner struct {
-	parallel      int
-	Model         model.Model
-	weights       *mlx.Scope
-	Tokenizer     *tokenizer.Tokenizer
-	Requests      chan queuedRequest
-	Sampler       *sample.Sampler
-	cache         *prefixCache
-	contextLength int
-	mlxThread     *mlxthread.Thread
+	parallel         int
+	parallelContext  int
+	fullContextBytes int64 // Estimated per-client storage at the projected context size.
+	Model            model.Model
+	weights          *mlx.Scope
+	Tokenizer        *tokenizer.Tokenizer
+	Requests         chan queuedRequest
+	Sampler          *sample.Sampler
+	cache            *prefixCache
+	contextLength    int
+	mlxThread        *mlxthread.Thread
 	// grammarEngine is the structured-output subsystem; nil when the grammar
 	// library or vocabulary failed to load.
 	grammarEngine *grammarEngine
 	// spec is the speculative-decoding subsystem. Nil when the model ships no
 	// draft head.
 	spec *speculation
+
+	// Last retention observation for new slots; accessed on the MLX worker.
+	snapshotLimitBytes int64
 }
 
 func (r *Runner) Load(modelName string) error {
@@ -120,6 +135,7 @@ func (r *Runner) Load(modelName string) error {
 	r.weights = mlx.NewScope()
 	r.weights.Attach(weights...)
 	configureWiredMemory()
+	r.configureParallelism()
 	return nil
 }
 
@@ -210,7 +226,13 @@ func (r *Runner) loadModel(modelName string) (weights []*mlx.Array, err error) {
 		r.cache = newPrefixCache(slices.Concat(caches, draftCaches))
 		r.Sampler = sample.New(r.contextLength)
 		r.spec = newSpeculation(r, pipelineSlot, draftModel, caches, draftCaches)
-		r.grammarEngine = newGrammarEngine(logitsWidth(m), r.Tokenizer)
+		var capacity int
+		if r.parallel <= 0 && mlx.MetalIsAvailable() {
+			capacity = parallelContextLength(r.contextLength, r.parallelContext)
+		}
+		width, fullContextBytes := modelShapes(m, draftModel, capacity)
+		r.fullContextBytes = fullContextBytes
+		r.grammarEngine = newGrammarEngine(width, r.Tokenizer)
 
 		return w
 	})
@@ -236,26 +258,72 @@ func newDraftCaches(draft model.DraftModel) []cache.Cache {
 	return draft.NewCaches()
 }
 
-// logitsWidth reads a model's logits width off a one-token forward's static
-// shape — the same Forward and Unembed path decode logits take. Nothing is
-// evaluated.
-func logitsWidth(m model.Model) (width int) {
+// modelShapes inspects the existing one-token load graph without evaluating it.
+// Cache dimensions come from the same forward used for inference, including the
+// drafter, at the projected context size.
+func modelShapes(m model.Model, draft model.DraftModel, tokens int) (width int, fullContextBytes int64) {
 	mlx.Scoped(func() {
 		caches := m.NewCaches()
-		hidden, _ := m.Forward(&batch.Batch{
+		var draftCaches []cache.Cache
+		if tokens > 0 {
+			draftCaches = newDraftCaches(draft)
+		}
+		defer func() {
+			for _, c := range slices.Concat(caches, draftCaches) {
+				if c != nil {
+					c.Free()
+				}
+			}
+		}()
+		b := &batch.Batch{
 			InputIDs:     mlx.FromValues([]int32{0}, 1, 1),
 			SeqOffsets:   []int32{0},
 			SeqQueryLens: []int32{1},
-		}, cache.Layers(caches))
+		}
+		hidden, aux := m.Forward(b, cache.Layers(caches))
 		logits := m.Unembed(hidden)
 		width = logits.Dim(logits.NumDims() - 1)
-		for _, c := range caches {
-			if c != nil {
-				c.Free()
-			}
+		if tokens <= 0 {
+			return
 		}
+		if len(draftCaches) > 0 {
+			if aux == nil {
+				return
+			}
+			b.Hidden = aux
+			draft.Forward(b, cache.Layers(caches), cache.Layers(draftCaches))
+		}
+		checkpoints := (tokens + prefillSnapshotInterval - 1) / prefillSnapshotInterval
+		for _, c := range caches {
+			bytes, ok := cache.EstimateMemory(c, tokens, checkpoints)
+			if !ok || bytes > math.MaxInt64-fullContextBytes {
+				fullContextBytes = 0
+				return
+			}
+			fullContextBytes += bytes
+		}
+		if fullContextBytes == 0 {
+			return
+		}
+		// Scoring keeps the target's hidden outputs and briefly holds both
+		// sides of a growing concatenation. It does not run the drafter.
+		hiddenBytes := int64(hidden.NumBytes())
+		if hiddenBytes > (math.MaxInt64-fullContextBytes)/int64(tokens)/2 {
+			fullContextBytes = 0
+			return
+		}
+		scoreBytes := fullContextBytes + 2*hiddenBytes*int64(tokens)
+		for _, c := range draftCaches {
+			bytes, ok := cache.EstimateMemory(c, tokens, checkpoints)
+			if !ok || bytes > math.MaxInt64-fullContextBytes {
+				fullContextBytes = 0
+				return
+			}
+			fullContextBytes += bytes
+		}
+		fullContextBytes = max(fullContextBytes, scoreBytes)
 	})
-	return width
+	return width, fullContextBytes
 }
 
 func configureWiredMemory() {
