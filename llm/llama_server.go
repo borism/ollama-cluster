@@ -1351,18 +1351,55 @@ var peerUploadLogInterval = 30 * time.Second
 
 // loadStallTimeout returns the stall timeout: OLLAMA_LOAD_TIMEOUT, raised to
 // the time peer data needs at peerUploadMinRate.
-// ponytail: peer bytes come from the logged buffer sizes (model + KV +
-// compute), which overstates the upload slightly; exact upload bytes need
-// llama.cpp support.
 func (s *llamaServerRunner) loadStallTimeout(base time.Duration) time.Duration {
-	var peerBytes uint64
-	for _, b := range s.RPCVRAM() {
-		peerBytes += b
-	}
-	if need := time.Duration(peerBytes/peerUploadMinRate) * time.Second; need > base {
+	if need := time.Duration(s.peerBytes()/peerUploadMinRate) * time.Second; need > base {
 		return need
 	}
 	return base
+}
+
+// peerBytes is the data headed for RPC peers: the larger of the parsed RPC*
+// buffer sizes (exact, but llama.cpp prints them only just before the upload
+// and a load can go silent earlier) and plannedPeerBytes (known at launch).
+// The max, not the parsed value alone, so the floor never drops once the log
+// appears. ponytail: the parsed sum includes KV and compute buffers, so it
+// overstates the upload slightly; exact upload bytes need llama.cpp support.
+func (s *llamaServerRunner) peerBytes() uint64 {
+	var parsed uint64
+	for _, b := range s.RPCVRAM() {
+		parsed += b
+	}
+	return max(parsed, s.plannedPeerBytes())
+}
+
+// plannedPeerBytes estimates the model bytes placed on peers from the launch
+// options alone. Peers sort before local devices in llama.cpp, so the first
+// len(peers) --tensor-split entries are theirs (see api.Options.TensorSplit).
+// ponytail: with no split it assumes an even share per device, where llama.cpp
+// splits by free memory, and it ignores KV/compute buffers. Take the bytes from
+// the scheduler's placement if this proves too low or too high.
+func (s *llamaServerRunner) plannedPeerBytes() uint64 {
+	if s.options.RPCServers == "" {
+		return 0
+	}
+	peers := strings.Count(s.options.RPCServers, ",") + 1
+	share := float64(peers) / float64(peers+max(len(s.gpus), 1))
+	var split []float64
+	var total float64
+	for f := range strings.SplitSeq(s.options.TensorSplit, ",") {
+		if v, err := strconv.ParseFloat(strings.TrimSpace(f), 64); err == nil && v >= 0 {
+			split = append(split, v)
+			total += v
+		}
+	}
+	if total > 0 {
+		var onPeers float64
+		for _, v := range split[:min(peers, len(split))] {
+			onPeers += v
+		}
+		share = onPeers / total
+	}
+	return uint64(float64(modelFileSize(s.modelPath, s.metadata)) * share)
 }
 
 func (s *llamaServerRunner) WaitUntilRunning(ctx context.Context) error {
@@ -1442,12 +1479,8 @@ func (s *llamaServerRunner) WaitUntilRunning(ctx context.Context) error {
 
 		if now := time.Now(); now.After(nextPeerLog) {
 			nextPeerLog = now.Add(peerUploadLogInterval)
-			if peer := s.RPCVRAM(); len(peer) > 0 {
-				var total uint64
-				for _, b := range peer {
-					total += b
-				}
-				slog.Info("still loading", "peer_gib", float64(total)/(1<<30), "elapsed", now.Sub(s.loadStart).Round(time.Second), "stall_timeout", stallTimeout)
+			if peer := s.peerBytes(); peer > 0 {
+				slog.Info("still loading", "peer_gib", float64(peer)/(1<<30), "elapsed", now.Sub(s.loadStart).Round(time.Second), "stall_timeout", stallTimeout)
 			}
 		}
 

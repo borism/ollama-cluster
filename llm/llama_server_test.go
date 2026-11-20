@@ -1225,6 +1225,80 @@ func TestLlamaServerWaitUntilRunningScalesTimeoutWithPeerBytes(t *testing.T) {
 	}
 }
 
+func rpcOpts(servers, split string) api.Options {
+	return api.Options{Runner: api.Runner{RPCServers: servers, TensorSplit: split}}
+}
+
+func TestLlamaServerPlannedPeerBytes(t *testing.T) {
+	model := filepath.Join(t.TempDir(), "m.gguf")
+	if err := os.WriteFile(model, make([]byte, 1000), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gpu := []ml.DeviceInfo{{}}
+	for _, tc := range []struct {
+		name string
+		opts api.Options
+		gpus []ml.DeviceInfo
+		want uint64
+	}{
+		{"no peers", api.Options{}, gpu, 0},
+		{"split names the peer first", rpcOpts("192.0.2.10:50052", "1,3"), gpu, 250},
+		{"two peers", rpcOpts("192.0.2.10:50052,192.0.2.11:50052", "1,1,2"), gpu, 500},
+		{"no split: even per device", rpcOpts("192.0.2.10:50052", ""), gpu, 500},
+		{"no split, no local gpu", rpcOpts("192.0.2.10:50052", ""), nil, 500},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &llamaServerRunner{modelPath: model, options: tc.opts, gpus: tc.gpus}
+			if got := r.plannedPeerBytes(); got != tc.want {
+				t.Fatalf("plannedPeerBytes = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// The load can go silent before llama.cpp prints any "RPC0 ... model buffer
+// size" line. The floor must then come from the placement alone.
+func TestLlamaServerWaitUntilRunningPlannedPeerBytesCoverSilenceBeforeRPCLine(t *testing.T) {
+	t.Setenv("OLLAMA_LOAD_TIMEOUT", "50ms")
+	// Half of a 1 MiB model on the peer at 256 KiB/s is a 2s floor.
+	old := peerUploadMinRate
+	peerUploadMinRate = 256 << 10
+	defer func() { peerUploadMinRate = old }()
+
+	model := filepath.Join(t.TempDir(), "m.gguf")
+	if err := os.WriteFile(model, make([]byte, 1<<20), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if time.Since(start) < 300*time.Millisecond {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			fmt.Fprint(w, `{"status":"loading model"}`)
+			return
+		}
+		fmt.Fprint(w, `{"status":"ok"}`)
+	}))
+	defer srv.Close()
+
+	var portInt int
+	parts := strings.Split(srv.URL, ":")
+	fmt.Sscanf(parts[len(parts)-1], "%d", &portInt)
+
+	runner := &llamaServerRunner{
+		port:      portInt,
+		cmd:       fakeRunningCmd(),
+		modelPath: model,
+		options:   rpcOpts("192.0.2.10:50052", "1,1"),
+	}
+	if got := len(runner.RPCVRAM()); got != 0 {
+		t.Fatalf("no RPC buffer line should have been parsed, got %d devices", got)
+	}
+	if err := runner.WaitUntilRunning(t.Context()); err != nil {
+		t.Fatalf("WaitUntilRunning error: %v", err)
+	}
+}
+
 func TestLlamaServerCompletionRequestFormat(t *testing.T) {
 	tests := []struct {
 		name           string
