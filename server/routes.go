@@ -693,6 +693,11 @@ func (s *Server) GenerateHandler(c *gin.Context) {
 				}
 				// TEMP(drifkin): req.Context will be removed very soon, but we're temporarily supporting it in this flow here
 				if req.Context != nil {
+					for i := range media {
+						for j := range media[i].TagOffsets {
+							media[i].TagOffsets[j] += b.Len()
+						}
+					}
 					b.WriteString(prompt)
 					prompt = b.String()
 				}
@@ -749,8 +754,9 @@ func (s *Server) GenerateHandler(c *gin.Context) {
 		// A raw prompt gives no way to tell where the response starts, so the
 		// format applies from its first token.
 		var thinkingClose []string
+		var formatFrames *model.StructuredOutputFrames
 		if !req.Raw {
-			thinkingClose = thinkingCloseForCompletion(builtinParser, thinkTagParser)
+			thinkingClose, formatFrames = prepareStructuredOutput(builtinParser, thinkTagParser, req.Format, prompt)
 		}
 
 		if err := r.Completion(ctx, llm.CompletionRequest{
@@ -765,6 +771,7 @@ func (s *Server) GenerateHandler(c *gin.Context) {
 			PreservedTokens: preservedTokensForCompletion(builtinParser),
 			LeadingBOS:      leadingBOS,
 			ThinkingClose:   thinkingClose,
+			FormatFrames:    formatFrames,
 		}, func(cr llm.CompletionResponse) {
 			res := api.GenerateResponse{
 				Model:     req.Model,
@@ -2051,7 +2058,7 @@ func GetModelInfo(req api.ShowRequest) (*api.ShowResponse, error) {
 		}
 		// Populate tensor info if verbose
 		if req.Verbose {
-			if tensors, err := getSafetensorsTensorInfoForRunner(name, req.Runner); err == nil {
+			if tensors, err := getTensorInfoFromManifest(mf, modelDetails.Family); err == nil {
 				resp.Tensors = tensors
 			}
 		}
@@ -2973,6 +2980,22 @@ func thinkingCloseForCompletion(builtinParser parsers.Parser, thinkTagParser *th
 	return nil
 }
 
+// The sampler needs the response framing before it generates tokens. Let the
+// parser recognize any opener already in the prompt before asking where thinking ends.
+func prepareStructuredOutput(parser parsers.Parser, tagParser *thinkingparser.Parser, format json.RawMessage, prompt string) ([]string, *model.StructuredOutputFrames) {
+	var frames *model.StructuredOutputFrames
+	switch string(format) {
+	case "", `null`, `""`:
+	default:
+		if p, ok := parser.(interface {
+			StructuredOutputFrames(string) *model.StructuredOutputFrames
+		}); ok {
+			frames = p.StructuredOutputFrames(prompt)
+		}
+	}
+	return thinkingCloseForCompletion(parser, tagParser), frames
+}
+
 func leadingBOSForModel(m *Model) string {
 	if m == nil || m.Config.Renderer == "" {
 		return ""
@@ -3413,6 +3436,7 @@ func (s *Server) ChatHandler(c *gin.Context) {
 
 		var parserErr error
 
+		thinkingClose, formatFrames := prepareStructuredOutput(builtinParser, thinkTagParser, req.Format, prompt)
 		err := r.Completion(ctx, llm.CompletionRequest{
 			Prompt:          prompt,
 			Media:           media,
@@ -3425,7 +3449,8 @@ func (s *Server) ChatHandler(c *gin.Context) {
 			PreservedTokens: preservedTokensForCompletion(builtinParser),
 			ToolCallTag:     toolCallTagForCompletion(toolParser),
 			LeadingBOS:      leadingBOSForModel(m),
-			ThinkingClose:   thinkingCloseForCompletion(builtinParser, thinkTagParser),
+			ThinkingClose:   thinkingClose,
+			FormatFrames:    formatFrames,
 		}, func(r llm.CompletionResponse) {
 			res := api.ChatResponse{
 				Model:     req.Model,
@@ -3727,7 +3752,15 @@ func chatMessagesForRequest(m *Model, requestMessages []api.Message) []api.Messa
 
 	// Loaded runners retain m, so request messages must not share its backing slice.
 	msgs := append(slices.Clone(m.Messages), requestMessages...)
-	if requestMessages[0].Role != "system" && m.System != "" {
+	if m.Config.Renderer == "inkling2" {
+		// Inkling2's serving protocol maps developer instructions to system messages.
+		for i := range msgs {
+			if msgs[i].Role == "developer" {
+				msgs[i].Role = "system"
+			}
+		}
+	}
+	if msgs[len(m.Messages)].Role != "system" && m.System != "" {
 		msgs = append([]api.Message{{Role: "system", Content: m.System}}, msgs...)
 	}
 	return filterThinkTags(msgs, m)
