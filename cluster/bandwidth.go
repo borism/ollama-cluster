@@ -144,7 +144,13 @@ func bandwidthPeer(t *Table, p Peer, port int) {
 		return
 	}
 	slog.Debug("cluster: probed peer bandwidth", "id", p.ID, "addr", p.Addr, "mbps", mbps)
-	t.setLinkBandwidth(p.ID, p.Addr, mbps)
+	// Refresh, never create, a candidate's entry: an entry marks an address
+	// probePeer compared against a latency-equal rival and picked, which is
+	// what lets it be kept through a blip. An address that merely was the
+	// provisional one (a Wi-Fi beacon source) must not become sticky.
+	if t.linkBandwidth(p.ID, p.Addr) > 0 {
+		t.setLinkBandwidth(p.ID, p.Addr, mbps)
+	}
 	t.setBandwidth(p.ID, mbps)
 }
 
@@ -196,12 +202,18 @@ func (t *Table) setLinkBandwidth(id, ip string, mbps float64) {
 	t.links[id+"|"+ip] = linkStat{mbps, time.Now()}
 }
 
+// linkBandwidthTTL is how long a candidate's measurement is used: two
+// bandwidthIntervals, so the current address (re-measured every interval by
+// bandwidthLoop) never lapses between refreshes, and a rival is re-measured
+// at most every ten minutes.
+const linkBandwidthTTL = 2 * bandwidthInterval
+
 // linkBandwidth returns a candidate's measurement if it is younger than
-// bandwidthInterval, else 0.
+// linkBandwidthTTL, else 0.
 func (t *Table) linkBandwidth(id, ip string) float64 {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if s, ok := t.links[id+"|"+ip]; ok && time.Since(s.at) < bandwidthInterval {
+	if s, ok := t.links[id+"|"+ip]; ok && time.Since(s.at) < linkBandwidthTTL {
 		return s.mbps
 	}
 	return 0
