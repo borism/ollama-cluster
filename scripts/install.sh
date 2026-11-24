@@ -55,7 +55,8 @@ if [ -n "${OLLAMA_VERSION:-}" ]; then
 else
     RELEASE_BASE="https://github.com/${REPO}/releases/latest/download"
 fi
-VER_PARAM=""
+# Fork releases have no channels/version query param; keep the shared name empty.
+DOWNLOAD_PARAM=""
 
 ###########################################
 # macOS
@@ -152,7 +153,7 @@ download_and_extract() {
     local filename="$3"
 
     # Check if .tar.zst is available
-    if curl --fail --silent --head --location "${url_base}/${filename}.tar.zst${VER_PARAM}" >/dev/null 2>&1; then
+    if curl --fail --silent --head --location "${url_base}/${filename}.tar.zst${DOWNLOAD_PARAM}" >/dev/null 2>&1; then
         # zst file exists - check if we have zstd tool
         if ! available zstd; then
             error "This version requires zstd for extraction. Please install zstd and try again:
@@ -163,7 +164,7 @@ download_and_extract() {
 
         status "Downloading ${filename}.tar.zst"
         curl --fail --show-error --location --progress-bar \
-            "${url_base}/${filename}.tar.zst${VER_PARAM}" | \
+            "${url_base}/${filename}.tar.zst${DOWNLOAD_PARAM}" | \
             zstd -d | $SUDO tar -xf - -C "${dest_dir}"
         return 0
     fi
@@ -171,7 +172,7 @@ download_and_extract() {
     # Fall back to .tgz for older versions
     status "Downloading ${filename}.tgz"
     curl --fail --show-error --location --progress-bar \
-        "${url_base}/${filename}.tgz${VER_PARAM}" | \
+        "${url_base}/${filename}.tgz${DOWNLOAD_PARAM}" | \
         $SUDO tar -xzf - -C "${dest_dir}"
 }
 
